@@ -1,5 +1,9 @@
 # deepseek-acp
 
+[![npm 版本](https://img.shields.io/npm/v/deepseek-acp)](https://www.npmjs.com/package/deepseek-acp)
+[![npm 月下载量](https://img.shields.io/npm/dm/deepseek-acp)](https://www.npmjs.com/package/deepseek-acp)
+[![CI 状态](https://github.com/xintaofei/deepseek-acp/actions/workflows/ci.yml/badge.svg)](https://github.com/xintaofei/deepseek-acp/actions/workflows/ci.yml)
+
 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 接成一个**面向编辑器的完整编码 Agent**，
 通过 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）与客户端通话。
 
