@@ -6,9 +6,6 @@
  * 应答里的值有没有跟着变」——客户端只能靠后者重绘控件。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import type { RouteChoice } from '../src/config/options.js'
@@ -17,10 +14,7 @@ import type { SessionControls } from '../src/port/types.js'
 import { FAKE_MODEL, FAKE_MODEL_ALT, FAKE_PROVIDER, FAKE_PROVIDER_ALT } from './fake-llm.js'
 import { createHarness, waitFor } from './harness.js'
 import { NATIVE_SHELL_TOOL, writeFileCommand } from './native-shell.js'
-
-function realTempDir(prefix = 'dsacp-cfg-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 取某个配置项。 */
 function option(options: readonly SessionConfigOption[] | null | undefined, id: string) {
@@ -38,10 +32,33 @@ function route(model: string, modelName: string): RouteChoice {
   return { provider: 'p', providerName: 'P', model, modelName }
 }
 
+/** 某个 select 里某个取值的说明文案。 */
+function describeOf(o: SessionConfigOption | undefined, value: string): string | null | undefined {
+  if (o === undefined || o.type !== 'select') return undefined
+  const flat = o.options.flatMap((e) => ('group' in e ? e.options : [e]))
+  return flat.find((x) => x.value === value)?.description
+}
+
+/** 只关心沙箱维度时的最小 controls。 */
+function sandboxControls(mode: string): SessionControls {
+  return {
+    model: () => undefined,
+    provider: () => undefined,
+    setRoute: () => {},
+    contextWindow: () => undefined,
+    reasoningEffort: () => undefined,
+    setReasoningEffort: () => {},
+    sandboxMode: () => mode,
+    setSandboxMode: () => {},
+  }
+}
+
+const ALL_MODES = ['read-only', 'workspace-write', 'danger-full-access']
+
 describe('TC-CFG-01 权限预设（US-17）', () => {
   it('session/new 声明沙箱配置项，当前值为部署默认', async () => {
     const h = await createHarness({ shell: 'sandbox' })
-    const created = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const created = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
 
     const sandbox = option(created.configOptions, SANDBOX_OPTION)
     expect(sandbox?.type).toBe('select')
@@ -53,7 +70,7 @@ describe('TC-CFG-01 权限预设（US-17）', () => {
 
   it('设置后应答里的 currentValue 立即反映新值', async () => {
     const h = await createHarness({ shell: 'sandbox' })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
 
     const set = await h.acp.request('session/set_config_option', {
       sessionId: sessionId as never,
@@ -107,8 +124,8 @@ describe('TC-CFG-01 权限预设（US-17）', () => {
 
   it('切换只影响本会话', async () => {
     const h = await createHarness({ shell: 'sandbox' })
-    const a = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
-    const b = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const a = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
+    const b = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
 
     await h.acp.request('session/set_config_option', {
       sessionId: a.sessionId as never,
@@ -158,7 +175,7 @@ describe('TC-CFG-01 权限预设（US-17）', () => {
 describe('TC-CFG-04 模型切换（US-16）', () => {
   it('声明模型项，当前值为建会话时用的那个', async () => {
     const h = await createHarness()
-    const created = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const created = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
     const model = option(created.configOptions, MODEL_OPTION)
     expect(model?.type === 'select' ? model.currentValue : undefined).toBe(FAKE_MODEL)
     expect(values(model)).toEqual([FAKE_MODEL, FAKE_MODEL_ALT])
@@ -167,7 +184,7 @@ describe('TC-CFG-04 模型切换（US-16）', () => {
 
   it('切换后下一次请求真的发给新模型 —— 只改显示值等于没切', async () => {
     const h = await createHarness()
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
 
     await h.acp.request('session/prompt', {
       sessionId: sessionId as never,
@@ -190,8 +207,8 @@ describe('TC-CFG-04 模型切换（US-16）', () => {
 
   it('切换只影响本会话', async () => {
     const h = await createHarness()
-    const a = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
-    const b = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const a = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
+    const b = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
 
     await h.acp.request('session/set_config_option', {
       sessionId: a.sessionId as never,
@@ -212,7 +229,7 @@ describe('TC-CFG-04 模型切换（US-16）', () => {
 describe('TC-CFG-02 校验', () => {
   it('未知 configId 被拒 —— 静默接受会让客户端以为生效了', async () => {
     const h = await createHarness({ shell: 'sandbox' })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
     await expect(
       h.acp.request('session/set_config_option', {
         sessionId: sessionId as never,
@@ -225,7 +242,7 @@ describe('TC-CFG-02 校验', () => {
 
   it('不在候选里的值被拒 —— 否则拼错的模型 id 会一路带到下一次请求', async () => {
     const h = await createHarness({ shell: 'sandbox' })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
     await expect(
       h.acp.request('session/set_config_option', {
         sessionId: sessionId as never,
@@ -253,7 +270,7 @@ describe('TC-CFG-03 组合决定声明什么', () => {
   it('没挂 sandboxPolicy 时不声明权限项', async () => {
     // 默认 harness 不挂沙箱
     const h = await createHarness()
-    const created = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const created = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
     expect(option(created.configOptions, SANDBOX_OPTION)).toBeUndefined()
     h.disposeBridge()
   }, 30_000)
@@ -406,7 +423,7 @@ describe('TC-CFG-05 多 provider 路由', () => {
 
   it('切到另一个 provider 的模型后，请求真的换了路由 —— 只改显示值等于没切', async () => {
     const h = await createHarness({ altProvider: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cfg-'), mcpServers: [] })
 
     await h.acp.request('session/prompt', {
       sessionId: sessionId as never,
@@ -436,4 +453,80 @@ describe('TC-CFG-05 多 provider 路由', () => {
     expect(h.llm.providersUsed).toEqual([FAKE_PROVIDER])
     h.disposeBridge()
   }, 40_000)
+})
+
+describe('TC-CFG-05 权限文案不承诺后端不保证的强制力', () => {
+  /**
+   * 为什么这组用例值得存在：这是**安全表达**，不是措辞偏好。
+   *
+   * 后端自报的强制力是分级的——Windows ACL 报 `enforcement: 'partial'`（受限
+   * 令牌必须保留 Everyone SID），而较旧的受支持 Landlock ABI **同样**报
+   * `partial`。用户是照着这句话决定要不要把权限收紧的；说得比后端做得到的更死，
+   * 就是在替后端许一个它兑不了的承诺。
+   */
+  const absolutes = ['不允许任何', '完全禁止', '一定', '保证', '无法写入']
+
+  it('三种模式的文案都不用绝对语气 —— 在任何平台上', () => {
+    for (const platform of ['win32', 'darwin', 'linux'] as const) {
+      const sandbox = option(
+        configOptions({
+          controls: sandboxControls('read-only'),
+          routes: [],
+          sandboxModes: ALL_MODES,
+          platform,
+        }),
+        SANDBOX_OPTION,
+      )
+      for (const mode of ALL_MODES) {
+        const text = describeOf(sandbox, mode) ?? ''
+        expect(text, `${platform}/${mode} 的文案`).not.toBe('')
+        for (const word of absolutes) expect(text, `${platform}/${mode} 的文案`).not.toContain(word)
+      }
+    }
+  })
+
+  it('Windows 上给两个受限模式补一句部分强制说明', () => {
+    const sandbox = option(
+      configOptions({
+        controls: sandboxControls('read-only'),
+        routes: [],
+        sandboxModes: ALL_MODES,
+        platform: 'win32',
+      }),
+      SANDBOX_OPTION,
+    )
+    expect(describeOf(sandbox, 'read-only')).toContain('部分强制')
+    expect(describeOf(sandbox, 'workspace-write')).toContain('部分强制')
+    // `danger-full-access` **不**加：那个模式本来就不声称有边界，给它补一句
+    // 「只约束常规 NTFS 写入」反而是凭空造出一条并不存在的边界。
+    expect(describeOf(sandbox, 'danger-full-access')).not.toContain('部分强制')
+  })
+
+  it('非 Windows 平台不出现那句话 —— 它讲的是 Windows 独有的事实', () => {
+    const sandbox = option(
+      configOptions({
+        controls: sandboxControls('read-only'),
+        routes: [],
+        sandboxModes: ALL_MODES,
+        platform: 'darwin',
+      }),
+      SANDBOX_OPTION,
+    )
+    for (const mode of ALL_MODES) expect(describeOf(sandbox, mode)).not.toContain('Windows')
+  })
+
+  it('词表外的模式原样透传，不编一句说明', () => {
+    // 上游新增模式时，宁可只显示 id，也不要给它安一段别的模式的后果描述。
+    const sandbox = option(
+      configOptions({
+        controls: sandboxControls('brand-new'),
+        routes: [],
+        sandboxModes: ['brand-new'],
+        platform: 'win32',
+      }),
+      SANDBOX_OPTION,
+    )
+    expect(values(sandbox)).toEqual(['brand-new'])
+    expect(describeOf(sandbox, 'brand-new')).toBeUndefined()
+  })
 })

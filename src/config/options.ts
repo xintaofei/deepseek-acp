@@ -27,11 +27,49 @@ const REASONING_LABELS: Record<string, { name: string; description: string }> = 
   max: { name: '最高', description: '推理更久；难题更稳，但慢且更费 token' },
 }
 
-/** 沙箱模式的展示名与说明。用户看到的是后果，不是词表里的字面量。 */
+/**
+ * 沙箱模式的展示名与说明。用户看到的是后果，不是词表里的字面量。
+ *
+ * **措辞一律陈述「这个模式意图约束什么」，不承诺「一定拦得住」。** 后端自报的
+ * 强制力是分级的：Windows ACL 报 `enforcement: 'partial'`——受限令牌必须保留
+ * Everyone SID，于是对 Everyone 授予写权限的外部对象仍然可写，而 NTFS 硬链接
+ * 还能让工作区内的路径与工作区外的路径指向同一个文件对象。**较旧的受支持
+ * Landlock ABI 同样报 `partial`**（`dsh-sandbox-local` README.zh:38-39），所以
+ * 绝对语气在任何平台上都是夸大，不只是 Windows——一个没装 bwrap、跑在旧内核上
+ * 的 Linux 部署，与 Windows 处在同一档。
+ */
 const SANDBOX_LABELS: Record<string, { name: string; description: string }> = {
-  'read-only': { name: '只读', description: '按只读策略执行；需要写入时应切换权限' },
-  'workspace-write': { name: '可写工作区', description: '可写会话工作区与系统临时目录；越界需要单次授权' },
-  'danger-full-access': { name: '完全访问', description: '不做任何文件限制。仅在你清楚后果时选择' },
+  'read-only': { name: '只读', description: '按只读策略执行；需要写入时切换权限' },
+  'workspace-write': {
+    name: '可写工作区',
+    description: '写入意在限制于会话工作区与系统临时目录；越界的调用会请求单次授权',
+  },
+  'danger-full-access': { name: '完全访问', description: '不施加任何文件限制。仅在你清楚后果时选择' },
+}
+
+/**
+ * Windows 上补给受限模式的部分强制说明。
+ *
+ * **为什么不做成事实驱动**：`enforcement` 挂在 `ConfinedArgv` 上，是**每一次
+ * `confine()` 调用的结果**，不是 provider 的静态属性。要在 advertise 配置项时
+ * 拿到真值就得先跑一次探针 `confine()`，而 ACL 后端的授权物化是整树立即传播的
+ * （大工作区上数十秒）。为一句文案付这个代价不划算；保守措辞是这里的正确解。
+ */
+const WINDOWS_PARTIAL = 'Windows 上是部分强制：只约束常规 NTFS 写入，不约束读取、网络与进程'
+
+/** 声称有边界的模式。`danger-full-access` 不在其中——它本来就不声称有边界。 */
+const FENCED_MODES: ReadonlySet<string> = new Set(['read-only', 'workspace-write'])
+
+/**
+ * 某个沙箱模式的说明文案。
+ * @param mode - 模式 id
+ * @param platform - 判断用的平台
+ * @returns 说明；模式不在词表里时 undefined（名字会退回原样的 id）
+ */
+function sandboxDescription(mode: string, platform: NodeJS.Platform): string | undefined {
+  const base = SANDBOX_LABELS[mode]?.description
+  if (base === undefined) return undefined
+  return platform === 'win32' && FENCED_MODES.has(mode) ? `${base}。${WINDOWS_PARTIAL}` : base
 }
 
 /**
@@ -128,6 +166,14 @@ export interface ConfigInputs {
     readonly efforts: readonly { id: string; name: string; description?: string }[]
     readonly defaultEffort?: string
   }
+  /**
+   * 判断沙箱文案用的平台；缺席时用 `process.platform`。
+   *
+   * 存在这个字段只为让用例能在别的平台上断言 Windows 的那句话。否则这条分支
+   * 只在 Windows CI 上被执行到，而它讲的恰恰是 Windows 独有的事实——最需要
+   * 覆盖的一句，反而最难在开发机上验证。
+   */
+  readonly platform?: NodeJS.Platform
 }
 
 /**
@@ -206,11 +252,14 @@ export function configOptions(inputs: ConfigInputs): SessionConfigOption[] {
       description: '命令与文件工具共用这一条边界',
       category: 'mode',
       currentValue: currentSandbox,
-      options: inputs.sandboxModes.map((mode) => ({
-        value: mode,
-        name: SANDBOX_LABELS[mode]?.name ?? mode,
-        ...(SANDBOX_LABELS[mode] !== undefined ? { description: SANDBOX_LABELS[mode].description } : {}),
-      })),
+      options: inputs.sandboxModes.map((mode) => {
+        const description = sandboxDescription(mode, inputs.platform ?? process.platform)
+        return {
+          value: mode,
+          name: SANDBOX_LABELS[mode]?.name ?? mode,
+          ...(description === undefined ? {} : { description }),
+        }
+      }),
     })
   }
 
