@@ -11,18 +11,14 @@
  * 后端不可用时组合本身就起不来，这些用例失败是对的信号。
  */
 
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { RequestPermissionRequest } from '@agentclientprotocol/sdk'
 import { SANDBOX_OPTION } from '../src/config/options.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-import { NATIVE_SHELL_TOOL, writeFileCommand } from './native-shell.js'
-
-function realTempDir(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'dsacp-sbx-')))
-}
+import { NATIVE_SHELL_TOOL, stderrAndExitCommand, writeFileCommand } from './native-shell.js'
+import { realTempDir } from './temp-dir.js'
 
 /** 起会话并跑一条平台 shell 命令，回合结算后返回。 */
 async function run(
@@ -30,7 +26,7 @@ async function run(
   args: Record<string, unknown>,
   mode?: 'read-only' | 'workspace-write' | 'danger-full-access',
 ): Promise<{ cards: Record<string, unknown>[]; cwd: string }> {
-  const cwd = realTempDir()
+  const cwd = realTempDir('dsacp-sbx-')
   const { sessionId } = await h.acp.request('session/new', { cwd, mcpServers: [] })
   if (mode !== undefined) {
     await h.acp.request('session/set_config_option', {
@@ -144,5 +140,32 @@ describe('TC-SBX-03 完全访问模式', () => {
       h.disposeBridge()
       rmSync(outside, { recursive: true, force: true })
     }
+  }, 40_000)
+})
+
+describe('TC-SBX-04 沙箱模式下的 stderr 与退出码', () => {
+  it('read-only 下 stderr 到达模型、退出码精确 —— 这条路径原先零覆盖', async () => {
+    // 为什么单独有这一条：`stderrAndExitCommand` 至今只被 `terminal.spec.ts`
+    // 用过，而那一批全是 `shell: 'local'`（FullLanguage）。它原先的 pwsh 分支
+    // 是 `[Console]::Error.WriteLine(...)`，在 `read-only` 的 ConstrainedLanguage
+    // 下会以 `Cannot invoke method` 失败——而没有任何用例会走到那里。
+    //
+    // 文本刻意用 **ASCII**：非 ASCII 在 `read-only` 下另有一个编码缺口
+    // （见 `pwsh-encoding.spec.ts`），混进来会让这条用例挂在无关的原因上。
+    const h = await createHarness({ shell: 'sandbox' })
+    const { cards } = await run(h, {
+      command: stderrAndExitCommand('diag-to-stderr', 3),
+      description: 'write to stderr and exit non-zero',
+    })
+
+    const done = cards.find((u) => u['sessionUpdate'] === 'tool_call_update')
+    // 非零退出是模型要读的结果，不是工具故障。
+    expect(done?.['status']).toBe('completed')
+    const text = resultText(cards)
+    // `toContain` 而不是全等：`Write-Error` 输出的是 ErrorRecord 渲染，要的那
+    // 句在里面但周围还有别的行。
+    expect(text).toContain('diag-to-stderr')
+    expect(text).toContain('[exit 3]')
+    h.disposeBridge()
   }, 40_000)
 })
