@@ -43,6 +43,7 @@
     "build": "tsc -p tsconfig.build.json && node -e \"require('fs').chmodSync('lib/bin.js', 0o755)\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:encoding": "vitest run --config vitest.encoding.config.ts",
     "test:watch": "vitest",
     "probe": "node scripts/acp-probe.mjs",
     "dump-prompt": "node scripts/dump-prompt.mjs",

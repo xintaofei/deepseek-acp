@@ -35,6 +35,11 @@ jobs:
       - run: npm.cmd run build
       - run: npm.cmd test
 
+      # 必须**也**在这里跑，不能只接进 ci.yml：打 tag 触发的是本工作流，而
+      # `npm.cmd test` 会把编码用例排除掉（主配置里排的）。少了这一步，编码
+      # 用例一次没跑就发版了，而且看不出来。
+      - run: npm.cmd run test:encoding
+
   publish:
     name: 发布到 npm
     needs: verify-windows

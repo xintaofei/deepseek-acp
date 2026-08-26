@@ -42,6 +42,14 @@ jobs:
       # 原生 shell 子进程、沙箱与会话落盘都走真实路径。
       - run: ${{ runner.os == 'Windows' && 'npm.cmd' || 'npm' }} test
 
+      # 原生子进程的非 ASCII 输出编码。单独一次**单 worker** 调用：那组用例要
+      # 临时改控制台的全局代码页，而上面那步在 Windows 上跑两个 worker，并发跑
+      # 会互相污染。主配置因此把这个文件排除掉——排除与本步骤是一对，缺一边就
+      # 等于这份覆盖不存在。
+      - name: 原生输出编码（Windows 专用）
+        if: runner.os == 'Windows'
+        run: npm.cmd run test:encoding
+
       # stdout 纯净性（AC-G1）由 tests/stdout-guard.spec.ts 在子进程级守着，
       # 已经包含在上面这步里。这里再单独验一次打包结果能不能真的跑起来——
       # `prepack` 会重新构建，等价于一次完整的发布演练。
