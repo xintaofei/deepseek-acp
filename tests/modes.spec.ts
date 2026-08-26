@@ -6,16 +6,10 @@
  * 落到上游的布尔上，而模型自己退出 plan mode 时选择器也要跟着回来。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { AVAILABLE_MODES, DEFAULT_MODE, PLAN_MODE, modeActive, modeId } from '../src/config/modes.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-
-function realTempDir(prefix = 'dsacp-mode-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 客户端收到的模式更新 id，按到达顺序。 */
 function modeUpdates(h: TestHarness): string[] {
@@ -30,8 +24,8 @@ function modeUpdates(h: TestHarness): string[] {
 describe('TC-MODE-01 能力声明', () => {
   it('未挂 plan-mode 时不 advertise modes，且 set_mode 报能力缺失', async () => {
     const h = await createHarness()
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
-    const created = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-mode-'), mcpServers: [] })
+    const created = await h.acp.request('session/new', { cwd: realTempDir('dsacp-mode-'), mcpServers: [] })
     expect(created.modes).toBeUndefined()
 
     // 「能力缺失」而非「参数错了」：后者会让客户端以为换个 id 重试有用。
@@ -43,7 +37,7 @@ describe('TC-MODE-01 能力声明', () => {
 
   it('挂了之后 session/new 带回两项词表，当前为常规', async () => {
     const h = await createHarness({ planMode: true })
-    const created = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const created = await h.acp.request('session/new', { cwd: realTempDir('dsacp-mode-'), mcpServers: [] })
 
     expect(created.modes?.currentModeId).toBe(DEFAULT_MODE)
     expect(created.modes?.availableModes.map((m) => m.id)).toEqual([DEFAULT_MODE, PLAN_MODE])
@@ -55,7 +49,7 @@ describe('TC-MODE-02 切换', () => {
   it('set_mode 落到上游的布尔状态上，并回一条 current_mode_update', async () => {
     const h = await createHarness({ planMode: true })
     const seen = modeUpdates(h)
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-mode-'), mcpServers: [] })
 
     await h.acp.request('session/set_mode', { sessionId, modeId: PLAN_MODE })
     const agent = h.ctx.agents.get(sessionId as never)!
@@ -68,7 +62,7 @@ describe('TC-MODE-02 切换', () => {
 
   it('未知 modeId 被拒 —— 静默落到 default 会让用户以为自己切成功了', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-mode-'), mcpServers: [] })
 
     await expect(
       h.acp.request('session/set_mode', { sessionId, modeId: 'yolo' }),
@@ -78,7 +72,7 @@ describe('TC-MODE-02 切换', () => {
 
   it('未知会话被拒', async () => {
     const h = await createHarness({ planMode: true })
-    await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    await h.acp.request('session/new', { cwd: realTempDir('dsacp-mode-'), mcpServers: [] })
 
     await expect(
       h.acp.request('session/set_mode', { sessionId: 'nope' as never, modeId: PLAN_MODE }),
@@ -90,7 +84,7 @@ describe('TC-MODE-02 切换', () => {
 describe('TC-MODE-03 已提交的状态变化也会通知', () => {
   it('/plan off 让选择器回到常规 —— 变化不只来自 set_mode', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-mode-'), mcpServers: [] })
     await h.acp.request('session/set_mode', { sessionId, modeId: PLAN_MODE })
 
     const seen = modeUpdates(h)
@@ -110,7 +104,7 @@ describe('TC-MODE-03 已提交的状态变化也会通知', () => {
 describe('TC-MODE-04 恢复', () => {
   it('session/load 还原当初的 plan 状态', async () => {
     const sessionsRoot = realTempDir('dsacp-mode-root-')
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-mode-')
     const recorder = await createHarness({ sessionsRoot, planMode: true })
     const { sessionId } = await recorder.acp.request('session/new', { cwd, mcpServers: [] })
     await recorder.acp.request('session/set_mode', { sessionId, modeId: PLAN_MODE })

@@ -6,18 +6,12 @@
  * 来——header 里没有标题，也没有「最后活动时间」。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { toSessionInfos } from '../src/protocol/session-list.js'
 import type { SessionSummary } from '../src/port/types.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-
-function realTempDir(prefix = 'dsacp-title-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 客户端收到的标题更新，按到达顺序。 */
 function titleUpdates(h: TestHarness): { title: string | null | undefined; updatedAt: string | null | undefined }[] {
@@ -44,7 +38,7 @@ describe('TC-TITLE-01 实时标题', () => {
   it('第一条用户消息之后推出标题，并带上事件自己的时间戳', async () => {
     const h = await createHarness({ title: true })
     const seen = titleUpdates(h)
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-title-'), mcpServers: [] })
 
     // 建会话时还没有任何用户消息，也就没有标题可推。
     expect(seen).toEqual([])
@@ -64,7 +58,7 @@ describe('TC-TITLE-01 实时标题', () => {
   it('没挂标题服务时一条都不推 —— 不编一个标题出来', async () => {
     const h = await createHarness()
     const seen = titleUpdates(h)
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-title-'), mcpServers: [] })
     await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '你好' }] })
 
     expect(seen).toEqual([])
@@ -75,7 +69,7 @@ describe('TC-TITLE-01 实时标题', () => {
 describe('TC-TITLE-02 恢复与列表', () => {
   it('session/load 重放同一条标题更新', async () => {
     const sessionsRoot = realTempDir('dsacp-title-root-')
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-title-')
     const recorder = await createHarness({ sessionsRoot, title: true })
     const { sessionId } = await recorder.acp.request('session/new', { cwd, mcpServers: [] })
     await recorder.acp.request('session/prompt', {
@@ -97,7 +91,7 @@ describe('TC-TITLE-02 恢复与列表', () => {
 
   it('session/list 从日志折出标题与最后活动时间', async () => {
     const sessionsRoot = realTempDir('dsacp-title-root-')
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-title-')
     const recorder = await createHarness({ sessionsRoot, title: true })
     const { sessionId } = await recorder.acp.request('session/new', { cwd, mcpServers: [] })
     await recorder.acp.request('session/prompt', {

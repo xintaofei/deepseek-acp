@@ -12,17 +12,13 @@
  * 4. 没挂技能面时逐字节不变（05）。
  */
 
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { describe, expect, it } from 'vitest'
 import { toAvailableCommands } from '../src/protocol/session-commands.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-
-function realTempDir(prefix: string): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /**
  * 写一个技能。

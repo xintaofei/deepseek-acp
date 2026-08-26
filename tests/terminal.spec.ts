@@ -9,9 +9,6 @@
  * （应为 `data`）—— 纯函数用例照着实现写，跟着一起错了。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { describe, expect, it } from 'vitest'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
@@ -21,11 +18,7 @@ import {
   stderrAndExitCommand,
   stdoutCommand,
 } from './native-shell.js'
-
-/** 真实临时目录；macOS 的 /tmp 是软链，`pwd` 会打印 /private/tmp。 */
-function realTempDir(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'dsacp-term-')))
-}
+import { realTempDir } from './temp-dir.js'
 
 interface RawUpdate {
   sessionUpdate: string
@@ -82,7 +75,7 @@ async function runCommand(
 describe('TC-TERM-01 支持终端的客户端拿到终端卡片', () => {
   it('调用侧：命令作标题、execute 卡、terminal 内容块、terminal_info 带 cwd', async () => {
     const h = await createHarness({ shell: 'local' })
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-term-')
     const command = stdoutCommand('hello-terminal')
     const { call } = await runCommand(h, {
       command,
@@ -109,7 +102,7 @@ describe('TC-TERM-01 支持终端的客户端拿到终端卡片', () => {
     const h = await createHarness({ shell: 'local' })
     const { result } = await runCommand(h, {
       command: stdoutCommand('hello-terminal'),
-      cwd: realTempDir(),
+      cwd: realTempDir('dsacp-term-'),
       terminal: true,
     })
 
@@ -129,7 +122,7 @@ describe('TC-TERM-02 非零退出', () => {
     const h = await createHarness({ shell: 'local' })
     const { result } = await runCommand(h, {
       command: stderrAndExitCommand('oops', 3),
-      cwd: realTempDir(),
+      cwd: realTempDir('dsacp-term-'),
       terminal: true,
     })
 
@@ -142,7 +135,7 @@ describe('TC-TERM-02 非零退出', () => {
 describe('TC-TERM-03 不支持终端的客户端', () => {
   it('退回围栏 console 文本，且完全不发 _meta', async () => {
     const h = await createHarness({ shell: 'local' })
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-term-')
     const command = stdoutCommand('plain-fallback')
     const { call, result } = await runCommand(h, {
       command,
@@ -168,7 +161,7 @@ describe('TC-TERM-03 不支持终端的客户端', () => {
 describe('TC-TERM-04 工作目录', () => {
   it('未给 workdir 时命令跑在会话 cwd 里', async () => {
     const h = await createHarness({ shell: 'local' })
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-term-')
     const { result } = await runCommand(h, { command: cwdCommand(), cwd, terminal: true })
 
     // 这条同时钉住两件事：cwd 表头没有说谎，且 N 个会话共用一个 executor 时

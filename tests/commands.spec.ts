@@ -8,17 +8,12 @@
  * 不只测「发了没有」。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { toAvailableCommands } from '../src/protocol/session-commands.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-
-function realTempDir(prefix = 'dsacp-cmd-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 客户端收到的命令快照，按到达顺序。 */
 function snapshots(h: TestHarness): AvailableCommand[][] {
@@ -39,7 +34,7 @@ describe('TC-CMD-01 命令目录', () => {
   it('未挂命令注册表时不推快照 —— 空目录也不推', async () => {
     const h = await createHarness()
     const seen = snapshots(h)
-    await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
     // 给延后的那条快照足够的时间真的发出来（如果它存在的话）。
     await new Promise((r) => setTimeout(r, 100))
     expect(seen).toEqual([])
@@ -49,7 +44,7 @@ describe('TC-CMD-01 命令目录', () => {
   it('挂了 plan-mode 后，session/new 之后推出含 /plan 的全量快照', async () => {
     const h = await createHarness({ planMode: true })
     const seen = snapshots(h)
-    await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
     await waitFor(() => seen.length > 0, 5_000, 'commands snapshot')
 
     expect(seen[0]).toEqual([
@@ -63,7 +58,7 @@ describe('TC-CMD-01 命令目录', () => {
     const seen = snapshots(h)
     // 客户端与 agent 共用一条有序流：若快照先于应答写出，它的处理器会先跑完，
     // 于是 `request` 兑现的那一刻 `seen` 里就已经有东西了。
-    await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
     expect(seen).toEqual([])
 
     await waitFor(() => seen.length > 0, 5_000, 'commands snapshot')
@@ -73,7 +68,7 @@ describe('TC-CMD-01 命令目录', () => {
   it('注册表变更时刷新每一个在册会话', async () => {
     const h = await createHarness({ planMode: true })
     const seen = snapshots(h)
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-cmd-')
     await h.acp.request('session/new', { cwd, mcpServers: [] })
     await h.acp.request('session/new', { cwd, mcpServers: [] })
     // 先等两条建会话快照落地，之后新增的才确定是刷新带来的。
@@ -96,7 +91,7 @@ describe('TC-CMD-01 命令目录', () => {
 
   it('session/load 把快照跟在历史后面一起给出', async () => {
     const sessionsRoot = realTempDir('dsacp-cmd-root-')
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-cmd-')
     const recorder = await createHarness({ sessionsRoot, planMode: true })
     const { sessionId } = await recorder.acp.request('session/new', { cwd, mcpServers: [] })
     await recorder.acp.request('session/prompt', {
@@ -120,7 +115,7 @@ describe('TC-CMD-01 命令目录', () => {
 describe('TC-CMD-02 命令不触发模型请求', () => {
   it('/plan 由命令面处理，模型一次都没被调用', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
 
     const result = await h.acp.request('session/prompt', {
       sessionId,
@@ -136,7 +131,7 @@ describe('TC-CMD-02 命令不触发模型请求', () => {
     ['压根不是命令语法', '/usr/bin/env 是什么'],
   ])('%s 的输入落回模型', async (_label, text) => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
 
     await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] })
     expect(h.llm.calls).toBe(1)
@@ -145,7 +140,7 @@ describe('TC-CMD-02 命令不触发模型请求', () => {
 
   it('没挂命令面时 /plan 也是普通文本', async () => {
     const h = await createHarness()
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
 
     await h.acp.request('session/prompt', {
       sessionId,
@@ -159,7 +154,7 @@ describe('TC-CMD-02 命令不触发模型请求', () => {
 describe('TC-CMD-03 命令结果呈现', () => {
   it('命令的产出经 command/done 事件浮现为助手文本', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
 
     await h.acp.request('session/prompt', {
       sessionId,
@@ -171,7 +166,7 @@ describe('TC-CMD-03 命令结果呈现', () => {
 
   it('/plan <消息> 会 steer 出一个真回合，prompt 等它跑完才结算', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
 
     const result = await h.acp.request('session/prompt', {
       sessionId,
@@ -187,7 +182,7 @@ describe('TC-CMD-03 命令结果呈现', () => {
 
   it('steer 出来的回合被截断时，如实报 max_tokens', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
     h.llm.finishWith = { kind: 'max-tokens' }
 
     // 这条链只有在命令路径接受「任意回合」的结束原因时才成立：被 steer 的那条
@@ -203,7 +198,7 @@ describe('TC-CMD-03 命令结果呈现', () => {
 
   it('steer 出来的回合失败时，prompt 以失败结束而不是假装正常', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-cmd-'), mcpServers: [] })
     h.llm.failWith = new Error('boom')
 
     // 这条链只有在命令路径接受「任意回合」的结束原因时才成立：那条被 steer

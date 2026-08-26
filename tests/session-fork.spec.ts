@@ -10,16 +10,10 @@
  *     种源排除在外，而 ACP 的客户端从会话列表里挑一条去 fork 是完全正常的用法。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { describe, expect, it } from 'vitest'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-
-function realTempDir(prefix = 'dsacp-fork-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { aliasDir, realTempDir } from './temp-dir.js'
 
 /** 建会话并聊一轮，返回会话 id。 */
 async function chat(h: TestHarness, cwd: string, text: string): Promise<string> {
@@ -261,6 +255,22 @@ describe('TC-FORK-05 拒绝路径', () => {
     await expect(
       h.acp.request('session/fork', { sessionId: parent as never, cwd: other, mcpServers: [] }),
     ).rejects.toThrow(/cwd mismatch/)
+    h.disposeBridge()
+  }, 30_000)
+
+  it('cwd 是同一个目录的另一种拼写时放行 —— 比的是目录，不是字符串', async () => {
+    const dirs = aliasDir('dsacp-fork-alias-')
+    if (dirs === undefined) return // 文件系统不支持重解析点
+    const h = await createHarness()
+    const parent = await chat(h, dirs.real, '一')
+    // 编辑器发来的 cwd 完全可以是软链/联接那一侧的拼写（macOS 的 `/var`、
+    // Windows 的 8.3 短名同理）。裸相等会让用户 fork 不了自己的会话。
+    const forked = await h.acp.request('session/fork', {
+      sessionId: parent as never,
+      cwd: dirs.alias,
+      mcpServers: [],
+    })
+    expect(String(forked.sessionId)).not.toBe(parent)
     h.disposeBridge()
   }, 30_000)
 

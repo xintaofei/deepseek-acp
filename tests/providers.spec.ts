@@ -6,15 +6,11 @@
  * 是一份缺了密钥的视图——三处各有一种漏法，各有一条用例。
  */
 
-import { mkdtempSync, readFileSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createHarness } from './harness.js'
-
-function realTempDir(prefix = 'dsacp-prov-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 这个部署的设置文档全文；还没写过时为空串。 */
 function settingsText(home: string): string {
@@ -36,7 +32,7 @@ function credentialsText(home: string): string {
 
 const SECRET = 'sk-super-secret-value-do-not-leak'
 
-function createProviderHarness(home = realTempDir()) {
+function createProviderHarness(home = realTempDir('dsacp-prov-')) {
   return createHarness({ settings: home, launchEnvironment: {} })
 }
 
@@ -67,7 +63,7 @@ describe('TC-PROV-01 能力位跟着组合走', () => {
 
 describe('TC-PROV-02 列表不漏密钥', () => {
   it('providers/list 的应答里一个字节的密钥都没有', async () => {
-    const home = realTempDir()
+    const home = realTempDir('dsacp-prov-')
     const h = await createProviderHarness(home)
     await h.acp.request('providers/set', {
       providerId: 'openai' as never,
@@ -104,7 +100,7 @@ describe('TC-PROV-02 列表不漏密钥', () => {
 
 describe('TC-PROV-03 密钥落凭据文件而不是设置文档', () => {
   it('set 之后：设置文档只有引用名，凭据文档才有明文', async () => {
-    const home = realTempDir()
+    const home = realTempDir('dsacp-prov-')
     const h = await createProviderHarness(home)
     await h.acp.request('providers/set', {
       providerId: 'openai' as never,
@@ -127,7 +123,7 @@ describe('TC-PROV-03 密钥落凭据文件而不是设置文档', () => {
   }, 30_000)
 
   it('不带授权头时不写凭据，路由照样配得上', async () => {
-    const home = realTempDir()
+    const home = realTempDir('dsacp-prov-')
     const h = await createProviderHarness(home)
     await h.acp.request('providers/set', {
       providerId: 'openai' as never,
@@ -142,7 +138,7 @@ describe('TC-PROV-03 密钥落凭据文件而不是设置文档', () => {
 
 describe('TC-PROV-04 禁用只删自己那一条', () => {
   it('disable 一个 provider 不会带走同段里另一个的配置', async () => {
-    const home = realTempDir()
+    const home = realTempDir('dsacp-prov-')
     const h = await createProviderHarness(home)
     const set = async (id: string, url: string): Promise<void> => {
       await h.acp.request('providers/set', {

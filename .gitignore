@@ -21,6 +21,10 @@ node_modules/
 # 会话日志
 .sessions/
 
+# 用例在仓库根下造的临时工作区（`tests/sandbox.spec.ts` 要一个工作区**之外**
+# 但仍在磁盘上的目录）。用例正常结束会清掉；崩在中间时别让它污染 git status。
+.dsacp-*
+
 # 凭据
 .env
 .env.*

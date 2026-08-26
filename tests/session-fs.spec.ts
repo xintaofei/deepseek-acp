@@ -6,16 +6,18 @@
  * 在某条冷路径上悄悄换掉语义——所以这里逐项钉。
  */
 
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { clientTextReader, type RequestFn } from '../src/answerers/fs-read.js'
 import { DelegatedReadFileSystem, type ClientTextReader } from '../src/composition/session-fs.js'
 import { createHarness, type TestHarness } from './harness.js'
+import { aliasDir, realTempDir } from './temp-dir.js'
 
 const DISK = '磁盘上的旧内容\n'
 const BUFFER = '编辑器里没保存的新内容\n'
@@ -37,20 +39,20 @@ interface Fixture {
 async function fixture(): Promise<Fixture> {
   const ctx = new Context()
   await ctx.plugin(LocalFileSystem, {})
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'dsacp-fs-')))
+  const dir = realTempDir('dsacp-fs-')
   const file = join(dir, 'a.txt')
   writeFileSync(file, DISK, 'utf8')
   return { base: ctx.fs, file, asked: [] }
 }
 
 /** 把 `reader` 套到 `f.base` 上，并记录每次委托调用。 */
-function decorate(f: Fixture, reader: ClientTextReader): FileSystem {
+function decorate(f: Pick<Fixture, 'base' | 'asked'>, reader: ClientTextReader): FileSystem {
   const ctx = new Context()
   return new DelegatedReadFileSystem(ctx, {
     base: f.base,
-    read: async (path, signal) => {
+    read: async (path, opts) => {
       f.asked.push(path)
-      return reader(path, signal)
+      return reader(path, opts)
     },
   })
 }
@@ -75,6 +77,9 @@ describe('TC-FS-01 读改道', () => {
     const fs = decorate(f, async () => undefined)
     const target = await fs.resolve(f.file)
     expect(await fs.readText(target)).toBe(DISK)
+    // 只问一次：这个夹具里调用方拼写与规范化拼写相同，TC-FS-06 的别名兜底
+    // 不该给这个常态多加一次 ACP 往返。
+    expect(f.asked).toEqual([f.file])
   })
 
   it('大文件那条流式读路径同样改道 —— 两条读路径不能分叉', async () => {
@@ -174,6 +179,173 @@ describe('TC-FS-03 能力事实必须透传', () => {
   })
 })
 
+/**
+ * 造一份「同一个文件、两种拼写」的夹具：`link/a.txt` 与 `real/a.txt` 是同一个
+ * 文件，前者未经 realpath。
+ * @returns 两种拼写；建不出目录链接时 undefined
+ */
+function makeAlias(): { real: string; alias: string } | undefined {
+  const dirs = aliasDir('dsacp-fs-alias-')
+  if (dirs === undefined) return undefined
+  writeFileSync(join(dirs.real, 'a.txt'), DISK, 'utf8')
+  return { real: join(dirs.real, 'a.txt'), alias: join(dirs.alias, 'a.txt') }
+}
+
+const ALIAS = makeAlias()
+
+describe('TC-FS-06 路径别名：委托必须问到编辑器手里那份缓冲区', () => {
+  if (ALIAS === undefined) {
+    // 留一条**看得见**的跳过记录：整组静默消失等于没有这份覆盖，而这正是
+    // 本项目在 Windows 上栽过的那个跟头。
+    it.skip('需要支持重解析点/符号链接的文件系统，本机建不出目录链接', () => {})
+    return
+  }
+  const { alias } = ALIAS
+
+  let base: FileSystem
+  let asked: string[]
+  /**
+   * 委托实际会发出的第一个拼写。
+   *
+   * **取自被测系统自己**（`processPath`），不在测试里重算一遍 realpath：上游
+   * `LocalFileSystem` 用的是 `fs/promises` 的 `realpath`（非 `.native`），测试
+   * 若挑了另一个变体，在 Windows 上就会与被测对象对不上而给出假结论。
+   */
+  let canonical: string
+
+  beforeEach(async () => {
+    const ctx = new Context()
+    await ctx.plugin(LocalFileSystem, {})
+    base = ctx.fs
+    asked = []
+    canonical = base.processPath(await base.resolve(alias))
+  })
+
+  /** 只认某一个拼写：命中给缓冲区，其余一律「给不出」。 */
+  function onlyForPath(want: string): ClientTextReader {
+    return async (path) => (path === want ? BUFFER : undefined)
+  }
+
+  it('前提成立：两种拼写不同，但指向同一个文件', () => {
+    expect(canonical).not.toBe(alias)
+    expect(readFileSync(canonical, 'utf8')).toBe(readFileSync(alias, 'utf8'))
+  })
+
+  it('规范化拼写命中时只问一次 —— 兜底不该给常态加一次往返', async () => {
+    const fs = decorate({ base, asked }, onlyForPath(canonical))
+    expect(await fs.readText(await fs.resolve(alias))).toBe(BUFFER)
+    expect(asked).toEqual([canonical])
+  })
+
+  it('编辑器只认调用方拼写时，改问它 —— 而不是静默把磁盘上的旧内容交给模型', async () => {
+    // 这条钉的是一次**静默降级**：编辑器手里是改脏了的缓冲区，我们按 realpath
+    // 去问、它按自己那份拼写找不到，于是模型拿到上次保存的版本去改新文件，
+    // 而卡片上完全看不出发生过降级。
+    const fs = decorate({ base, asked }, onlyForPath(alias))
+    const text = await fs.readText(await fs.resolve(alias))
+    expect(text).toBe(BUFFER)
+    expect(text).not.toBe(DISK)
+    // 顺序不能反：规范化拼写在前。反过来会在「编辑器改脏的是链接目标、模型
+    // 走的是链接路径」时打开一个从磁盘新建的缓冲区，从此问不到那份脏数据。
+    expect(asked).toEqual([canonical, alias])
+  })
+
+  it('两个拼写都落空才回落磁盘', async () => {
+    const fs = decorate({ base, asked }, async () => undefined)
+    expect(await fs.readText(await fs.resolve(alias))).toBe(DISK)
+    expect(asked).toEqual([canonical, alias])
+  })
+
+  it('streamText 与 readText 同源 —— 大文件那条路不能只问一个拼写', async () => {
+    const fs = decorate({ base, asked }, onlyForPath(alias))
+    let text = ''
+    for await (const chunk of await fs.streamText(await fs.resolve(alias))) text += chunk
+    expect(text).toBe(BUFFER)
+    expect(asked).toEqual([canonical, alias])
+  })
+
+  it('第二个拼写命中时，诊断里不该出现「回落磁盘」—— 那一行会说谎', async () => {
+    // 装的是真的 `clientTextReader`，不是测试替身：会不会说谎取决于它与
+    // `askClient` 之间那个 `final` 约定，只测其中一半等于没测。
+    const warned: string[] = []
+    const read = clientTextReader(
+      SessionId('s-alias'),
+      async (_method, params) => {
+        if (params.path !== alias) throw new Error('client has no buffer for this file')
+        return { content: BUFFER }
+      },
+      (message) => warned.push(message),
+    )
+    const fs = new DelegatedReadFileSystem(new Context(), { base, read })
+    expect(await fs.readText(await fs.resolve(alias))).toBe(BUFFER)
+    expect(warned).toEqual([])
+  })
+
+  it('两个拼写都落空时，「回落磁盘」只记一行 —— 不是每个候选一行', async () => {
+    const warned: string[] = []
+    const read = clientTextReader(
+      SessionId('s-alias'),
+      async () => {
+        throw new Error('client has no buffer for this file')
+      },
+      (message) => warned.push(message),
+    )
+    const fs = new DelegatedReadFileSystem(new Context(), { base, read })
+    expect(await fs.readText(await fs.resolve(alias))).toBe(DISK)
+    expect(warned).toHaveLength(1)
+    // 记的是**最后**那个候选：那才是真正走到磁盘的那一次。
+    expect(warned[0]).toContain(alias)
+  })
+})
+
+describe('TC-FS-07 委托的诊断：`final` 决定何时记「回落磁盘」', () => {
+  /** 造一个读委托，返回它与它记下的诊断行。 */
+  function reader(respond: RequestFn): { read: ClientTextReader; warned: string[] } {
+    const warned: string[] = []
+    return { read: clientTextReader(SessionId('s-1'), respond, (m) => warned.push(m)), warned }
+  }
+
+  const boom: RequestFn = async () => {
+    throw new Error('nope')
+  }
+
+  it('非最后一个候选落空时保持安静 —— 后面还有一次机会', async () => {
+    const { read, warned } = reader(boom)
+    expect(await read('/a.txt', { final: false })).toBeUndefined()
+    expect(warned).toEqual([])
+  })
+
+  it('最后一个候选落空才记 —— 这时才真的要读磁盘了', async () => {
+    const { read, warned } = reader(boom)
+    expect(await read('/a.txt', { final: true })).toBeUndefined()
+    expect(warned).toHaveLength(1)
+    expect(warned[0]).toContain('/a.txt')
+    expect(warned[0]).toContain('nope')
+  })
+
+  it('省略 opts 时按「最后一个候选」处理 —— 少写一个实参不该让诊断消失', async () => {
+    const { read, warned } = reader(boom)
+    expect(await read('/a.txt')).toBeUndefined()
+    expect(warned).toHaveLength(1)
+  })
+
+  it('客户端不报错地给不出内容，同样算一次回落', async () => {
+    // 以前这条路一行不记。两段式下它还会吃掉前一个候选的错误（那个已经按
+    // `final: false` 保持安静），于是整次回落变得毫无痕迹。
+    const { read, warned } = reader(async () => ({}))
+    expect(await read('/a.txt')).toBeUndefined()
+    expect(warned).toHaveLength(1)
+    expect(warned[0]).toContain('no content')
+  })
+
+  it('空字符串是命中不是落空 —— 不记诊断，也不读磁盘', async () => {
+    // 混淆这两者的后果很具体：模型会认为文件是空的，然后「补全」它。
+    const { read, warned } = reader(async () => ({ content: '' }))
+    expect(await read('/a.txt')).toBe('')
+    expect(warned).toEqual([])
+  })
+})
+
 describe('TC-FS-04 端到端：ACP 反向请求 → read 工具', () => {
   /** 让模型调一次 `read`，返回工具结果里的文本。 */
   async function readViaTool(h: TestHarness, path: string): Promise<string> {
@@ -190,7 +362,7 @@ describe('TC-FS-04 端到端：ACP 反向请求 → read 工具', () => {
 
   it('客户端声明了能力，读就走 fs/read_text_file 并拿到缓冲区内容', async () => {
     const h = await createHarness({ fs: true, fsRead: true })
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'dsacp-e2e-')))
+    const dir = realTempDir('dsacp-e2e-')
     const file = join(dir, 'buf.txt')
     writeFileSync(file, DISK, 'utf8')
     h.setFsReadResponder(() => ({ content: BUFFER }))
@@ -208,7 +380,7 @@ describe('TC-FS-04 端到端：ACP 反向请求 → read 工具', () => {
 
   it('客户端报错时静默回落磁盘 —— 委托只是锦上添花，不该有让 read 挂掉的权力', async () => {
     const h = await createHarness({ fs: true, fsRead: true })
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'dsacp-e2e-fail-')))
+    const dir = realTempDir('dsacp-e2e-fail-')
     const file = join(dir, 'buf.txt')
     writeFileSync(file, DISK, 'utf8')
     // 不设应答器，用默认的那个：它抛「client has no buffer for this file」。
@@ -231,7 +403,7 @@ describe('TC-FS-04 端到端：ACP 反向请求 → read 工具', () => {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
     })
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'dsacp-e2e-nocap-')))
+    const dir = realTempDir('dsacp-e2e-nocap-')
     const file = join(dir, 'buf.txt')
     writeFileSync(file, DISK, 'utf8')
     h.setFsReadResponder(() => ({ content: BUFFER }))

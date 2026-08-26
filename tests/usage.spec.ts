@@ -6,19 +6,13 @@
  * 不发（编一个默认值会画出一根看起来权威、刻度却是错的进度条）。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { MODEL_OPTION } from '../src/config/options.js'
 import { mapEvent } from '../src/mapping/updates.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
 import { FAKE_MODEL_ALT } from './fake-llm.js'
-
-function realTempDir(prefix = 'dsacp-usage-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 一条带记账的 `assistant/message` 事件。 */
 function messageWith(usage: Record<string, number> | undefined): SessionEvent {
@@ -97,7 +91,7 @@ describe('TC-USAGE-02 端到端：一轮对话后客户端拿到占用', () => {
   it('跑完一轮后推出 usage_update，分母是当前模型的上下文窗口', async () => {
     const h = await createHarness()
     const seen = collect(h)
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-usage-'), mcpServers: [] })
     // **第一轮**就要有：窗口大小虽然要异步解析，但建会话时已经热过一次，
     // 所以用量条不会在会话开头空一轮。
     await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '一' }] })
@@ -115,7 +109,7 @@ describe('TC-USAGE-02 端到端：一轮对话后客户端拿到占用', () => {
     const h = await createHarness()
     const seen = collect(h)
     h.llm.usage = undefined
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-usage-'), mcpServers: [] })
     await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '一' }] })
 
     expect(usageUpdates(seen)).toEqual([])
@@ -124,7 +118,7 @@ describe('TC-USAGE-02 端到端：一轮对话后客户端拿到占用', () => {
 
   it('会话内换模型后，分母跟着换', async () => {
     const h = await createHarness()
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-usage-'), mcpServers: [] })
     // 先跑一轮，把第一个模型的窗口解析进缓存。
     await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '一' }] })
 

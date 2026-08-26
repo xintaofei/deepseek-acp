@@ -11,8 +11,6 @@
  * （plan mode 认这个 code）。这两条错了，界面上一切正常，只是计划永远批不过。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { RequestPermissionRequest, RequestPermissionResponse } from '@agentclientprotocol/sdk'
@@ -25,10 +23,7 @@ import {
   type PermissionAskDeps,
 } from '../src/answerers/permission-ask.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-
-function realTempDir(prefix = 'dsacp-ask-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 const SESSION = 'sess-1' as SessionId
 const CALL = 'call-1'
@@ -214,7 +209,7 @@ describe('TC-ASK-03 提问循环', () => {
 describe('TC-ASK-04 端到端：客户端没有表单能力时照样能问', () => {
   /** 让模型发起一次 ask_user_question 调用，返回会话 id。 */
   async function askThroughModel(h: TestHarness, questions: unknown): Promise<string> {
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-ask-'), mcpServers: [] })
     h.llm.toolCall = { id: 'ask-1', name: 'ask_user_question', args: JSON.stringify({ questions }) }
     await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '开始' }] })
     return String(sessionId)
@@ -245,7 +240,7 @@ describe('TC-ASK-04 端到端：客户端没有表单能力时照样能问', () 
     // 这条最要紧：计划评审只有提问这一个出口，且它对答案形状（`selected` 恰好
     // 一项且无 `custom`）的要求最严——降级路径走歪一点这里就通不过。
     const h = await createHarness({ planMode: true, elicitation: false })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-ask-'), mcpServers: [] })
     await h.acp.request('session/set_mode', { sessionId, modeId: 'plan' })
 
     h.setPermissionResponder((request) => pickNth(request, 0)) // opt-0 = Approve
@@ -266,7 +261,7 @@ describe('TC-ASK-04 端到端：客户端没有表单能力时照样能问', () 
 
   it('选了「继续规划」时不退出 —— 只有精确的批准标签才算通过', async () => {
     const h = await createHarness({ planMode: true, elicitation: false })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-ask-'), mcpServers: [] })
     await h.acp.request('session/set_mode', { sessionId, modeId: 'plan' })
 
     h.setPermissionResponder((request) => pickNth(request, 1)) // opt-1 = Keep planning

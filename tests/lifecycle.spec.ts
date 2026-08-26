@@ -8,20 +8,14 @@
  * 一段恢复逻辑，所以这里既测差异（回放与否），也测共性（cwd 校验、能力声明）。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { describeClient } from '../src/protocol/initialize.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-
-function realTempDir(prefix = 'dsacp-life-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 建一个会话、跑一轮并完全退休录制端，返回可供恢复的 id 与 cwd。 */
 async function persistedSession(h: TestHarness): Promise<{ sessionId: string; cwd: string }> {
-  const cwd = realTempDir()
+  const cwd = realTempDir('dsacp-life-')
   const { sessionId } = await h.acp.request('session/new', { cwd, mcpServers: [] })
   await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '你好' }] })
   h.disposeBridge()
@@ -32,7 +26,7 @@ async function persistedSession(h: TestHarness): Promise<{ sessionId: string; cw
 describe('TC-CLOSE-01 关闭会话释放资源', () => {
   it('关掉之后 agent 不再存活，且同一个 id 不能再发 prompt', async () => {
     const h = await createHarness()
-    const cwd = realTempDir()
+    const cwd = realTempDir('dsacp-life-')
     const { sessionId } = await h.acp.request('session/new', { cwd, mcpServers: [] })
     expect(h.hasAgent(String(sessionId))).toBe(true)
 
@@ -52,8 +46,8 @@ describe('TC-CLOSE-01 关闭会话释放资源', () => {
 
   it('关闭不波及兄弟会话（AC-G3）', async () => {
     const h = await createHarness()
-    const a = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
-    const b = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const a = await h.acp.request('session/new', { cwd: realTempDir('dsacp-life-'), mcpServers: [] })
+    const b = await h.acp.request('session/new', { cwd: realTempDir('dsacp-life-'), mcpServers: [] })
 
     await h.acp.request('session/close', { sessionId: a.sessionId })
 
@@ -83,7 +77,7 @@ describe('TC-CLOSE-01 关闭会话释放资源', () => {
     // 对外可观测的契约（不挂起、语义是取消），两条路径都得满足它。
     const h = await createHarness()
     h.llm.delayMs = 5_000 // 制造一个足够长的在途窗口
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-life-'), mcpServers: [] })
 
     const inflight = h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '慢慢来' }] })
     await waitFor(() => h.llm.calls > 0, 5_000, 'model call started')
@@ -154,7 +148,7 @@ describe('TC-RESUME-01 恢复但不回放', () => {
 
     const h = await createHarness({ sessionsRoot: root })
     await expect(
-      h.acp.request('session/resume', { sessionId, cwd: realTempDir(), mcpServers: [] }),
+      h.acp.request('session/resume', { sessionId, cwd: realTempDir('dsacp-life-'), mcpServers: [] }),
     ).rejects.toThrow()
     h.disposeBridge()
   }, 60_000)
@@ -208,7 +202,7 @@ describe('TC-RESUME-02 能力声明跟着组合走', () => {
   it('没挂持久化时调 resume 直接 methodNotFound —— 声明与实现同一个真值来源', async () => {
     const h = await createHarness()
     await expect(
-      h.acp.request('session/resume', { sessionId: 'x', cwd: realTempDir(), mcpServers: [] }),
+      h.acp.request('session/resume', { sessionId: 'x', cwd: realTempDir('dsacp-life-'), mcpServers: [] }),
     ).rejects.toThrow()
     h.disposeBridge()
   }, 30_000)

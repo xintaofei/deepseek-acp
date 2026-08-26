@@ -13,18 +13,13 @@
  * 回收），漏掉隔离就是在用户的 `~/.dsh/attachments/` 里堆一堆没人认领的文件。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { describe, expect, it } from 'vitest'
 import { MODEL_OPTION } from '../src/config/options.js'
 import { createHarness, type TestHarness } from './harness.js'
 import { FAKE_MODEL_VISION } from './fake-llm.js'
-
-function realTempDir(prefix = 'dsacp-img-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 一张真的 4×4 红色 PNG。准入会完整解码它，所以不能拿假字节糊弄。 */
 const RED_PNG =

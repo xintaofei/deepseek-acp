@@ -8,19 +8,13 @@
  * 通不过评审——而那种错误在「问题显示出来了」这层是看不见的。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { CreateElicitationRequest, ElicitationSchema } from '@agentclientprotocol/sdk'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import { toAnswer, toElicitation } from '../src/answerers/elicitation.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
-
-function realTempDir(prefix = 'dsacp-eli-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 const SESSION = 'sess-1' as SessionId
 
@@ -31,7 +25,7 @@ function schemaOf(request: CreateElicitationRequest): ElicitationSchema {
 
 /** 让模型发起一次 ask_user_question 调用，返回会话 id。 */
 async function askThroughModel(h: TestHarness, questions: unknown): Promise<string> {
-  const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+  const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-eli-'), mcpServers: [] })
   h.llm.toolCall = { id: 'ask-1', name: 'ask_user_question', args: JSON.stringify({ questions }) }
   await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '开始' }] })
   return String(sessionId)
@@ -190,7 +184,7 @@ describe('TC-ELI-03 端到端：模型提问 → 客户端表单 → 工具结�
 describe('TC-ELI-04 计划评审（exit_plan_mode）走的是同一条链', () => {
   it('批准后退出 plan mode，选择器回到常规', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-eli-'), mcpServers: [] })
     await h.acp.request('session/set_mode', { sessionId, modeId: 'plan' })
 
     h.setElicitationResponder(() => ({ action: 'accept', content: { 'plan-review': 'Approve' } }))
@@ -209,7 +203,7 @@ describe('TC-ELI-04 计划评审（exit_plan_mode）走的是同一条链', () =
 
   it('选了「继续规划」时不退出 —— 只有精确的批准标签才算通过', async () => {
     const h = await createHarness({ planMode: true })
-    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const { sessionId } = await h.acp.request('session/new', { cwd: realTempDir('dsacp-eli-'), mcpServers: [] })
     await h.acp.request('session/set_mode', { sessionId, modeId: 'plan' })
 
     h.setElicitationResponder(() => ({ action: 'accept', content: { 'plan-review': 'Keep planning' } }))

@@ -13,8 +13,7 @@
  *     用户则以为自己的历史被删了。
  */
 
-import { mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { RequestError } from '@agentclientprotocol/sdk'
@@ -24,10 +23,7 @@ import type { Bridge } from '../src/bridge.js'
 import type { SessionCatalog } from '../src/port/types.js'
 import { rethrowMissingSession } from '../src/protocol/session-missing.js'
 import { createHarness, waitFor } from './harness.js'
-
-function realTempDir(prefix: string): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 function findSessionLog(root: string): string | undefined {
   for (const entry of readdirSync(root, { withFileTypes: true })) {

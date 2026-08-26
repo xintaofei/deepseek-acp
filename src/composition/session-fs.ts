@@ -46,11 +46,18 @@ import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandb
  * 返回 `undefined` 表示「这条路走不通，请走磁盘」——**错误分类归实现方**，因为
  * 只有它知道哪些 ACP 错误是良性的（客户端没打开这个文件、文件超过它的读上限）
  * 哪些是真故障。本模块不 catch：抛出来的异常就该抛出来。
- * @param path - 后端执行世界里的绝对路径（`processPath` 的产物）
- * @param signal - 随工具调用取消
- * @returns 客户端那份文本；`undefined` 表示回落磁盘
+ * @param path - 该文件的一种绝对路径拼写；见 {@link DelegatedReadFileSystem}
+ *   的 `askClient`，同一次读可能按不同拼写问两次
+ * @param opts - 取消信号，以及「这是最后一个候选」的标记
+ * @param opts.signal - 随工具调用取消
+ * @param opts.final - 这次落空即等于回落磁盘。**缺席按 `true` 处理**：只问一次
+ *   的调用方不必知道有这回事，而诊断该记的那一行不能因为省略了实参而丢
+ * @returns 客户端那份文本；`undefined` 表示这个拼写问不到
  */
-export type ClientTextReader = (path: string, signal?: AbortSignal) => Promise<string | undefined>
+export type ClientTextReader = (
+  path: string,
+  opts?: { readonly signal?: AbortSignal | undefined; readonly final?: boolean | undefined },
+) => Promise<string | undefined>
 
 /** 把单块文本包成 `streamText` 要的 `AsyncIterable`。 */
 async function* singleChunk(text: string): AsyncIterable<string> {
@@ -129,9 +136,37 @@ export class DelegatedReadFileSystem extends FileSystem {
     return this.baseFs.lstat(path, opts, signal)
   }
 
+  /**
+   * 先按规范化路径问编辑器，落空再按调用方拼写问一次。
+   *
+   * **路径不是字符串。** `processPath` 返回的是 realpath（`dsh-fs-local` 拿它
+   * 当 targetKey），而编辑器是按**它自己收到的那个拼写**在管缓冲区的——那个
+   * 拼写来自 `session/new` 的 cwd，正是 `displayPath` 保留下来的东西。两者在
+   * 有符号链接时不同（macOS 的 `/var` → `/private/var`、Windows 的目录联接），
+   * 于是委托问了个编辑器不认识的路径，`fs-read.ts` 把失败吞成回落磁盘，模型
+   * 拿到的是上次保存的旧内容——**静默**的错误输入。
+   *
+   * **顺序不能反。** 规范化路径是今天就在用的那个，先问它保证现有命中一个不丢；
+   * 反过来先问拼写，会在「编辑器改脏的是链接目标、模型走的是链接路径」时拿到
+   * 一个从磁盘新建的缓冲区——ACP 只要求绝对路径，成功打开不等于找到了那份脏
+   * 数据。所以这里严格只增不减：只在**今天会静默回落磁盘**的那条支路上多问
+   * 一次。两个拼写相同时（长名工作区的常态）不发第二次。
+   * @param target - 已解析的目标
+   * @param signal - 随工具调用取消
+   * @returns 编辑器那份文本；两个拼写都问不到时 undefined
+   */
+  private async askClient(target: FsTarget, signal?: AbortSignal): Promise<string | undefined> {
+    const canonical = this.baseFs.processPath(target)
+    const display = target.displayPath
+    const hasFallback = display !== canonical
+    const first = await this.clientRead(canonical, { signal, final: !hasFallback })
+    if (first !== undefined || !hasFallback) return first
+    return await this.clientRead(display, { signal, final: true })
+  }
+
   /** 先问编辑器；它给不出就走磁盘。 */
   async readText(target: FsTarget, signal?: AbortSignal): Promise<string> {
-    const fromClient = await this.clientRead(this.baseFs.processPath(target), signal)
+    const fromClient = await this.askClient(target, signal)
     return fromClient ?? (await this.baseFs.readText(target, signal))
   }
 
@@ -142,7 +177,7 @@ export class DelegatedReadFileSystem extends FileSystem {
    * 而它已经在内存里了，再切一刀只是自欺。
    */
   async streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterable<string>> {
-    const fromClient = await this.clientRead(this.baseFs.processPath(target), signal)
+    const fromClient = await this.askClient(target, signal)
     if (fromClient === undefined) return this.baseFs.streamText(target, signal)
     return singleChunk(fromClient)
   }

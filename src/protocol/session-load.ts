@@ -16,6 +16,7 @@ import { modeStateFor } from '../config/modes.js'
 import { mapEvent } from '../mapping/updates.js'
 import { ToolPresenter } from '../presentation/presenter.js'
 import type { SessionRecord } from '../session/table.js'
+import { sameWorkspace } from '../session/workspace-path.js'
 import { mountSpecs } from './mcp-params.js'
 import { commandsUpdate } from './session-commands.js'
 import { optionsFor } from './session-config.js'
@@ -88,7 +89,10 @@ export async function restoreSession(
     throw error
   }
 
-  if (handle.cwd !== undefined && handle.cwd !== params.cwd) {
+  // 比的是**目录**不是字符串：同一个工作区可以有多种拼写（Windows 8.3 短名、
+  // macOS 的 `/var` → `/private/var`），裸相等会让用户加载不了自己的会话。
+  // 反向的错更贵，所以 `sameWorkspace` 拿不准时判「不同」。
+  if (handle.cwd !== undefined && !(await sameWorkspace(handle.cwd, params.cwd))) {
     return await settled(
       invalidParams(
         `cwd mismatch: session ${sessionId} was created in ${handle.cwd}, request asked for ${params.cwd}`,

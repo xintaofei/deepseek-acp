@@ -6,18 +6,13 @@
  * 恢复会从内存拿到答案，磁盘上写没写、能不能读回来都不知道。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { describe, expect, it } from 'vitest'
 import { mapEvent } from '../src/mapping/updates.js'
 import { createHarness, waitFor, type CapturedUpdate, type TestHarness } from './harness.js'
 import { NATIVE_SHELL_TOOL, stdoutCommand } from './native-shell.js'
-
-function realTempDir(prefix: string): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { aliasDir, realTempDir } from './temp-dir.js'
 
 /** 在一个独立 harness 里聊一轮，返回会话 id 与它产出的更新。 */
 async function recordSession(
@@ -178,6 +173,28 @@ describe('TC-LOAD-02 恢复的校验', () => {
     h.disposeBridge()
   }, 30_000)
 
+  it('cwd 是同一个目录的另一种拼写时放行 —— 比的是目录，不是字符串', async () => {
+    // 这一条在 macOS 上不用建链接也会红：`os.tmpdir()` 是 `/var/folders/…`，
+    // 真实路径是 `/private/var/…`。Windows 上则是 8.3 短名。裸相等的后果是
+    // 用户**加载不了自己的会话**，而错误信息里两个路径看着还挺像。
+    //
+    // `session/resume` 不另写一条：它与 `session/load` 共用 `restoreSession`，
+    // cwd 校验就在那个函数里，覆盖这一侧即覆盖两侧。
+    const dirs = aliasDir('dsacp-load-alias-')
+    if (dirs === undefined) return // 文件系统不支持重解析点
+    const root = realTempDir('dsacp-load-')
+    const { sessionId } = await recordSession(root, dirs.real)
+
+    const h = await createHarness({ sessionsRoot: root })
+    await h.acp.request('session/load', {
+      sessionId: sessionId as never,
+      cwd: dirs.alias,
+      mcpServers: [],
+    })
+    expect(h.hasAgent(sessionId)).toBe(true)
+    h.disposeBridge()
+  }, 30_000)
+
   it('未知会话 id 报错而非静默建一个空会话', async () => {
     const h = await createHarness({ sessionsRoot: realTempDir('dsacp-load-') })
     await expect(
@@ -223,6 +240,22 @@ describe('TC-LIST-01 会话列表', () => {
     expect(listed.sessions.map((s) => String(s.sessionId))).toEqual([inA.sessionId])
     h.disposeBridge()
   }, 30_000)
+
+  it('按 cwd 过滤时认得同一个目录的另一种拼写', async () => {
+    const dirs = aliasDir('dsacp-list-alias-')
+    if (dirs === undefined) return // 文件系统不支持重解析点
+    const root = realTempDir('dsacp-list-')
+    const other = realTempDir('dsacp-ws-other-')
+    const inAlias = await recordSession(root, dirs.real)
+    await recordSession(root, other)
+
+    const h = await createHarness({ sessionsRoot: root })
+    // 编辑器按它自己那份拼写来问。裸相等的后果是会话选择器**空的**——用户会
+    // 以为历史没了。
+    const listed = await h.acp.request('session/list', { cwd: dirs.alias })
+    expect(listed.sessions.map((s) => String(s.sessionId))).toEqual([inAlias.sessionId])
+    h.disposeBridge()
+  }, 60_000)
 })
 
 describe('TC-LOAD-03 重放里的用户消息', () => {

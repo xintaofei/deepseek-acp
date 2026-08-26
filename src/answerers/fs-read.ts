@@ -27,6 +27,11 @@ export type RequestFn = (
  * 挂掉的权力。
  *
  * 代价是真故障也会被吞成静默降级，所以每次回落都记一行（走 stderr，AC-G1）。
+ *
+ * **「回落」是调用方才知道的事。** 同一次读可能按两种拼写各问一次（见
+ * `DelegatedReadFileSystem.askClient`），第一次落空并不意味着要读磁盘——第二次
+ * 可能命中。所以这一行由 `opts.final` 决定何时记，非最后一个候选落空时保持安静：
+ * 否则日志会在委托其实成功的那些读上说「回落磁盘了」。
  * @param sessionId - 本会话 id；随每次请求发给客户端
  * @param request - 反向请求函数
  * @param warn - 回落时的诊断输出
@@ -37,7 +42,10 @@ export function clientTextReader(
   request: RequestFn,
   warn: (message: string) => void,
 ): ClientTextReader {
-  return async (path, signal) => {
+  return async (path, opts) => {
+    // 缺席按「这是最后一个候选」处理：漏记一行诊断比多记一行坏。
+    const final = opts?.final ?? true
+    const signal = opts?.signal
     try {
       const response = await request(
         'fs/read_text_file',
@@ -46,9 +54,16 @@ export function clientTextReader(
       )
       // `content` 缺席与空字符串是两回事：后者是「客户端说这个文件是空的」，
       // 要如实返回，`?? undefined` 会把它错判成「客户端给不出」而去读磁盘。
-      return response?.content
+      const content = response?.content
+      // 客户端**不报错**地给不出内容，同样是一次回落。以前这条路一行不记，
+      // 而两段式下它会吃掉前一个候选的错误（前一个非 final 已经保持安静了），
+      // 于是整次回落变得毫无痕迹——正是这套诊断要防的那件事。
+      if (content === undefined && final) {
+        warn(`fs/read_text_file fell back to disk for ${path}: client returned no content`)
+      }
+      return content
     } catch (error) {
-      warn(`fs/read_text_file fell back to disk for ${path}: ${String(error)}`)
+      if (final) warn(`fs/read_text_file fell back to disk for ${path}: ${String(error)}`)
       return undefined
     }
   }

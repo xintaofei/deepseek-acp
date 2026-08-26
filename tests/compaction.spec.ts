@@ -9,19 +9,13 @@
  * 上游那一侧。这层要保证的只有一件事——事件翻对了没有。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { mapEvent } from '../src/mapping/updates.js'
 import { clientSupportsCompaction } from '../src/protocol/initialize.js'
 import { createHarness, waitFor } from './harness.js'
-
-function realTempDir(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'dsacp-compact-')))
-}
+import { realTempDir } from './temp-dir.js'
 
 const ID = 'cmp-1'
 
@@ -152,7 +146,7 @@ describe('TC-COMPACT-02 客户端没声明就一条都不发', () => {
     const h = await createHarness()
     await h.acp.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientCapabilities } as never)
     const { sessionId } = await h.acp.request('session/new', {
-      cwd: realTempDir(),
+      cwd: realTempDir('dsacp-compact-'),
       mcpServers: [],
     })
     const seen: Record<string, unknown>[] = []

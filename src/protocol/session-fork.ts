@@ -20,6 +20,7 @@ import type { Bridge } from '../bridge.js'
 import { invalidParams, internalError, resourceNotFound } from '../codec/errors.js'
 import { modeStateFor } from '../config/modes.js'
 import { ToolPresenter } from '../presentation/presenter.js'
+import { sameWorkspace } from '../session/workspace-path.js'
 import { mountSpecs } from './mcp-params.js'
 import { commandsUpdate } from './session-commands.js'
 import { optionsFor } from './session-config.js'
@@ -90,7 +91,7 @@ export async function handleForkSession(
   // 工作区不是入参而是**继承来的**：种子里全是父会话工作区里的路径，把它搬进
   // 另一个工作区，模型会拿着 A 项目的文件路径去改 B 项目的文件。`session/load`
   // 拒绝 cwd 漂移是同一个理由，这里更硬——那边至少还是同一条会话。
-  if (handle.cwd !== undefined && handle.cwd !== params.cwd) {
+  if (handle.cwd !== undefined && !(await sameWorkspace(handle.cwd, params.cwd))) {
     return await settled(
       invalidParams(
         `cwd mismatch: session ${parentSessionId} was created in ${handle.cwd}, request asked for ${params.cwd}`,

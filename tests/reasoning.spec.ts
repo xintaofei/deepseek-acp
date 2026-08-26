@@ -12,19 +12,13 @@
  *     什么都不往请求里放。照着报告画 UI 就是在显示一个我们并不保证的档位。
  */
 
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import { MODEL_OPTION, REASONING_OPTION, configOptions } from '../src/config/options.js'
 import type { SessionControls } from '../src/port/types.js'
 import { createHarness, type TestHarness } from './harness.js'
 import { FAKE_MODEL, FAKE_MODEL_ALT } from './fake-llm.js'
-
-function realTempDir(prefix = 'dsacp-reason-'): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
-}
+import { realTempDir } from './temp-dir.js'
 
 /** 取某个配置项。 */
 function option(options: readonly SessionConfigOption[] | undefined, id: string): SessionConfigOption | undefined {
@@ -126,7 +120,7 @@ describe('TC-REASON-01 档位项的组装', () => {
 describe('TC-REASON-02 端到端：切档位进得了请求', () => {
   /** 建会话并返回它的配置项。 */
   async function newSession(h: TestHarness): Promise<{ sessionId: string; options: SessionConfigOption[] }> {
-    const created = await h.acp.request('session/new', { cwd: realTempDir(), mcpServers: [] })
+    const created = await h.acp.request('session/new', { cwd: realTempDir('dsacp-reason-'), mcpServers: [] })
     return { sessionId: String(created.sessionId), options: (created.configOptions ?? []) as SessionConfigOption[] }
   }
 
