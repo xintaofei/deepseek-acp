@@ -403,7 +403,7 @@ export interface AgentDriver {
    */
   prepare(parts: readonly PromptPart[]): { readonly messageId: string; readonly submit: (agent: Agent) => void }
   cancel(agent: Agent): void
-  /** 整体静默（非单个回合结束）—— prompt 的正确结算点 */
+  /** 整体静默并确认已挂载的持久化完成；保存失败时拒绝，不能报告成功。 */
   whenIdle(agent: Agent): Promise<void>
 }
 

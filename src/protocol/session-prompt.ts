@@ -87,6 +87,11 @@ async function runCommand(
     // 按正常结束处理；prompt 路径下同样的情况意味着入队被丢弃，按取消处理。
     const end = inflight.endReason
     settle(end === undefined ? 'end_turn' : turnEndToStopReason(end))
+  }, (error: unknown) => {
+    if (record.inflight !== inflight) return
+    record.inflight = undefined
+    const detail = error instanceof Error ? error.message : String(error)
+    fail(internalError(`command completion failed: ${detail}`))
   })
   return { stopReason: await settled }
 }
@@ -220,6 +225,11 @@ export async function handlePrompt(bridge: Bridge, params: PromptRequest): Promi
         return
       }
       inflight.resolve(turnEndToStopReason(end))
+    }, (error: unknown) => {
+      if (record.inflight !== inflight) return
+      record.inflight = undefined
+      const detail = error instanceof Error ? error.message : String(error)
+      inflight.reject(internalError(`prompt completion failed: ${detail}`))
     })
   })
 

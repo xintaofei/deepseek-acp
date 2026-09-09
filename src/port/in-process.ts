@@ -252,6 +252,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
   // 下会抛错，所以走 `get` 这条明确的可选路径。
   const tools = ctx.get('tools')
   const persistence = ctx.get('sessionPersistence')
+  const sessions = ctx.get('sessions')
   const commandRuntime = ctx.get('commands')
   const planMode = ctx.get('planMode')
   const skillRegistry = ctx.get('skills')
@@ -877,8 +878,15 @@ export function createInProcessPort(ctx: Context): HarnessPort {
       cancel(agent: Agent): void {
         agent.cancel({ kind: 'user' })
       },
-      whenIdle(agent: Agent): Promise<void> {
-        return agent.whenIdle()
+      async whenIdle(agent: Agent): Promise<void> {
+        await agent.whenIdle()
+        // Harness idle does not drain write-behind persistence. A client may
+        // exit immediately after our prompt response, so settle only after
+        // the public session checkpoint has saved the completed turn.
+        if (persistence !== undefined) {
+          if (sessions === undefined) throw new Error('session store unavailable for persistence flush')
+          await sessions.flush(agent.session)
+        }
       },
     },
   }
