@@ -185,6 +185,16 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     }
   })
 
+  // ── 实时流式分片 ──────────────────────────────────────────────────
+  //
+  // 单独一条订阅：分片不是会话事件（日志里没有它，见 mapping/assistant-stream.ts），
+  // 而没有它客户端要等一整步结束才看到第一个字。
+  const offAssistantStream = port.events.onAssistantStream((agent, frame) => {
+    const record = table.ownedBy(agent)
+    if (record === undefined) return
+    for (const update of record.stream.frame(frame)) bridge.notify(record.acpSessionId, update)
+  })
+
   const offClaimed = port.events.onInboxClaimed((agent, messageId, turn) => {
     const inflight = table.ownedBy(agent)?.inflight
     if (inflight !== undefined && inflight.messageId === messageId) inflight.turn = turn
@@ -242,32 +252,33 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     ).then((decision) => decision ?? next())
   })
 
-  // ── 征询提供方：dsh 的 userQuestions → ACP 的提问通道 ─────────────────
+  // ── 征询应答器：dsh 的 user-questions/request → ACP 的提问通道 ────────
   //
-  // 与审批那条 waterfall 不同，这是**独占**的：一个 context 只能有一个 provider。
-  // 组合没挂这个 seam 时整段跳过（`ask_user_question` 与 `exit_plan_mode` 也就
-  // 不会存在或会自行报错）。
+  // 与审批那条同构的 waterfall（上游把原先独占的 `registerProvider` 换成了
+  // 作用域 waterfall）。因此认领规则也照抄那条：只接本 bridge 拥有的 agent，
+  // 其余一律 `next()`——否则会把同进程内其他消费方（子 agent、TUI）的提问
+  // 劫持到这条 ACP 连接上，而那边根本没有对应的会话可挂。
   //
   // 具体走表单还是授权通道由 `askUser` 按能力位选路，见 answerers/ask.ts。
-  const offQuestions = ctx.get('userQuestions')?.registerProvider({
-    ask: (request) => {
-      // 依赖在**每次提问时**现取：provider 在 apply 期就注册了，那时连接还没
-      // 建立，能力位也还没协商。在这里固化一份快照等于永远拿到「无连接、
-      // 不支持」。
-      const conn = connection
-      return askUser(request, {
-        elicitation: bridge.elicitation,
-        ...(conn === undefined
-          ? {}
-          : {
-              createElicitation: (params, options) => conn.request('elicitation/create', params, options),
-              requestPermission: (params, options) =>
-                conn.request('session/request_permission', params, options),
-            }),
-        sessionOf: (agent) => table.ownedBy(agent as Agent)?.acpSessionId,
-        soleCallOf: (agent) => table.ownedBy(agent as Agent)?.presenter.solePendingCall(),
-      })
-    },
+  const offQuestions = ctx.on('user-questions/request', (request, next) => {
+    const agent = request.agent
+    if (agent === undefined || table.ownedBy(agent) === undefined) return next()
+
+    // 依赖在**每次提问时**现取：监听器在 apply 期就挂上了，那时连接还没建立，
+    // 能力位也还没协商。在这里固化一份快照等于永远拿到「无连接、不支持」。
+    const conn = connection
+    return askUser(request, {
+      elicitation: bridge.elicitation,
+      ...(conn === undefined
+        ? {}
+        : {
+            createElicitation: (params, options) => conn.request('elicitation/create', params, options),
+            requestPermission: (params, options) =>
+              conn.request('session/request_permission', params, options),
+          }),
+      sessionOf: (agent) => table.ownedBy(agent as Agent)?.acpSessionId,
+      soleCallOf: (agent) => table.ownedBy(agent as Agent)?.presenter.solePendingCall(),
+    })
   })
 
   // ── ACP 应用：按方法名注册处理器 ──────────────────────────────────
@@ -335,6 +346,7 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
 
     const records = table.drain() // 置 closed，拒绝新会话与新 prompt（I3）
     offSessionEvent()
+    offAssistantStream()
     offClaimed()
     offCommands?.()
     offSkills?.()
@@ -342,9 +354,9 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     // 先摘掉审批应答器：teardown 期间再来的问题应当落到链尾的 fail-closed
     // 默认值，而不是发往一条正在关闭的连接。
     offApproval()
-    // 征询提供方同理：摘掉之后 seam 自己会报「没有提供方」，好过发往一条正在
+    // 征询应答器同理：摘掉之后 seam 自己会报「没有应答器」，好过发往一条正在
     // 关闭的连接然后永远等不到应答。
-    offQuestions?.()
+    offQuestions()
 
     // 先停自己的活再 await：释放可能阻塞在持久化上，期间顶层 agent
     // 不该继续跑模型与工具调用。

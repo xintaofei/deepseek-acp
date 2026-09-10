@@ -11,6 +11,7 @@
 import type { StopReason } from '@agentclientprotocol/sdk'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId, TurnEndReason } from '@deepseek-ai/dsh-session'
+import type { AssistantStreamRelay } from '../mapping/assistant-stream.js'
 import type { AgentHandle } from '../port/types.js'
 import type { ToolPresenter } from '../presentation/presenter.js'
 
@@ -46,6 +47,11 @@ export interface SessionRecord {
    * 跨会话共用会让两个会话的同名 callId 互相串。
    */
   readonly presenter: ToolPresenter
+  /**
+   * 同样按会话持有：它把实时帧流开头那一帧的 turn/step 记到后续分片用得上的
+   * 时候。跨会话共用会让两条会话的同名 attemptId 互相串。
+   */
+  readonly stream: AssistantStreamRelay
   inflight: InflightPrompt | undefined
 }
 

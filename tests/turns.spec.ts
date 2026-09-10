@@ -52,15 +52,17 @@ describe('回合结算（US-03）', () => {
 
   it('思考增量映射为 agent_thought_chunk 而非混入回复', async () => {
     const h = await boot()
+    // 端到端而非只测映射函数：0.1.5 起推理与正文走的是同一条**进程内帧流**，
+    // 而分流发生在帧的 `type` 上。只喂映射层的话，一个把两者都发成正文的
+    // 中继实现照样能过。
+    h.llm.reasoningDeltas = ['thi', 'nk']
+    h.llm.deltas = ['ok']
     const s = await newSession(h)
-    // 直接验证映射层；假适配器不产出 reasoning 分片。
-    const { mapEvent } = await import('../src/mapping/updates.js')
-    const updates = mapEvent({
-      type: 'assistant/chunk',
-      data: { chunk: { type: 'reasoning-delta', index: 0, text: 'think' } },
-    } as never)
-    expect(updates[0]?.sessionUpdate).toBe('agent_thought_chunk')
-    expect(s).toBeTruthy()
+    await prompt(h, s)
+
+    const mine = h.updates.filter((u) => u.sessionId === s)
+    expect(mine.filter((u) => u.kind === 'agent_thought_chunk').map((u) => u.text)).toEqual(['thi', 'nk'])
+    expect(mine.filter((u) => u.kind === 'agent_message_chunk').map((u) => u.text)).toEqual(['ok'])
   })
 
   it('同一会话第二个在途 prompt 被拒（I1）', async () => {

@@ -89,8 +89,8 @@ WSL、FAT、Everyone ACL 或硬链接边界；沙箱不可用时会拒绝执行�
 **图片输入。** 贴图或拖图进来即可，文本与图片**按线序**进模型（「改之前 [图] 改之后 [图]」
 不会被拍成「改之前改之后 [图][图]」）。字节落进 `$DSH_HOME/attachments/` 的内容寻址库，
 会话日志里只留引用——base64 直接写进日志会让一条日志涨到几十 MB，而每次恢复都要整份读回来。
-默认模型 `deepseek-v4-flash` **不收图片**：发图会被拒绝，并告诉你去模型选择器里换成
-`deepseek-v4-flash-vision-exp`。接受 PNG / JPEG / WebP / GIF，单条消息最多 20 张。
+默认模型 `deepseek-flash` **收图片**；切到纯文本路由上发图会被拒绝，拒绝信息里带着当前模型名，
+你据此去模型选择器里换。接受 PNG / JPEG / WebP / GIF，单条消息最多 20 张。
 
 **代码导航（`lsp`）。** 装了语言服务器就自动接上，没装就当它不存在——启动时按 `PATH`
 查一遍内置候选（`typescript-language-server`、`pyright-langserver`、`gopls`、

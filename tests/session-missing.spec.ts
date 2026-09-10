@@ -13,8 +13,7 @@
  *     用户则以为自己的历史被删了。
  */
 
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { RequestError } from '@agentclientprotocol/sdk'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -23,19 +22,8 @@ import type { Bridge } from '../src/bridge.js'
 import type { SessionCatalog } from '../src/port/types.js'
 import { rethrowMissingSession } from '../src/protocol/session-missing.js'
 import { createHarness, waitFor } from './harness.js'
+import { findSessionLog } from './session-log.js'
 import { realTempDir } from './temp-dir.js'
-
-function findSessionLog(root: string): string | undefined {
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const path = join(root, entry.name)
-    if (entry.isFile() && entry.name === 'session.jsonl') return path
-    if (entry.isDirectory()) {
-      const nested = findSessionLog(path)
-      if (nested !== undefined) return nested
-    }
-  }
-  return undefined
-}
 
 /** 一个格式合法、但从未存在过的会话 id。 */
 const GHOST = SessionId('00000000-0000-4000-8000-000000000000')
@@ -236,8 +224,11 @@ describe('TC-MISSING-03 别的失败不受影响', () => {
     // 里根本不出现，被判成「不存在」，客户端会安静地把它从列表里摘掉——用户
     // 那份还躺在磁盘上、原本可以抢救的历史，就这样被宣告删除了。
     //
-    // 换成 `readRaw` 之后才分得开：物件不在返回 `undefined`，物件在但读不出来
-    // 是**抛错**。
+    // 这条用例在 dsh 0.1.5 升级时又抓了同一个错误的第二个版本：`readRaw` 被
+    // 上游删掉后，第一版适配改用 `stat()`——而它按元数据挑选，对头部损坏的物件
+    // 同样报「没有」，于是这条用例立刻红了。现在的探测是 `open(id, 'read')`，
+    // 靠**错误类型**分：不存在抛 `SessionPersistenceNotFoundError`，头部损坏抛
+    // `SessionPersistenceCorruptionError`，只有前者允许改判。
     const root = realTempDir('dsacp-missing-')
     const cwd = realTempDir('dsacp-ws-')
     const sessionId = await record(root, cwd)
@@ -273,9 +264,12 @@ describe('TC-MISSING-03 别的失败不受影响', () => {
 
     // 前提自检：父会话确实开着，且确实还没有落盘物件。这两条不成立的话，下面
     // 那个断言就不再是在测它想测的东西了。
+    //
+    // 「没落盘」只能**看磁盘**：`stat()` 有进程内可见性（上游明确「create 一
+    // resolve，本进程就能 stat/list/open 到它，哪怕后端还没物化」），拿它当判据
+    // 会得到一个 present，而那正好是这条用例要制造的相反情形。
     expect(h.hasAgent(String(sessionId)), '父会话应当开着').toBe(true)
-    const persistence = h.ctx.get('sessionPersistence')
-    expect(await persistence!.readRaw(sessionId as never), '父会话不该已经落盘').toBeUndefined()
+    expect(findSessionLog(root), '父会话不该已经落盘').toBeUndefined()
 
     const fail = await failure(async () =>
       h.acp.request('session/fork', {
@@ -312,23 +306,27 @@ describe('TC-MISSING-03 别的失败不受影响', () => {
     const h = await createHarness({ sessionsRoot: root })
     const persistence = h.ctx.get('sessionPersistence')
     expect(persistence, 'harness 应当挂了持久化').toBeDefined()
-    let probed = 0
-    const real = persistence!.readRaw.bind(persistence)
+    // 数的是**只读 open**：探测本身就是一次 `open(id, 'read')`（见
+    // `presence`），而成功的 `session/load` 正好也要一次——那次是把历史读出来
+    // 念给客户端。所以判据是「恰好一次」：多出来的第二次就是被挪到操作之前的
+    // 那次探测。写 open（恢复端取写所有权）不在此列。
+    let reads = 0
+    const real = persistence!.open.bind(persistence)
     // 在实例上盖一个同名属性，遮蔽原型上的方法。
-    Object.defineProperty(persistence, 'readRaw', {
+    Object.defineProperty(persistence, 'open', {
       configurable: true,
       value: async (...args: Parameters<typeof real>) => {
-        probed += 1
+        if (args[1] === 'read') reads += 1
         return await real(...args)
       },
     })
 
     await h.acp.request('session/load', { sessionId: sessionId as never, cwd, mcpServers: [] })
-    expect(probed, '成功的 session/load 不该探测物件').toBe(0)
-    // 证明上面那个 0 不是因为拦截根本没装上——否则这条用例永远绿，包括在一个
+    expect(reads, '成功的 session/load 只该读一次历史，不该另探一次').toBe(1)
+    // 证明上面那个 1 不是因为拦截根本没装上——否则这条用例永远绿，包括在一个
     // 真的把探测挪到了前面的实现上。
-    await persistence!.readRaw(sessionId as never)
-    expect(probed, '拦截器应当是活的').toBe(1)
+    await (await persistence!.open(sessionId as never, 'read')).close()
+    expect(reads, '拦截器应当是活的').toBe(2)
     h.disposeBridge()
   }, 30_000)
 })

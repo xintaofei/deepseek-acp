@@ -4,7 +4,7 @@
  */
 
 import type { Plan, PlanEntry } from '@agentclientprotocol/sdk'
-import type { TodoItem } from '@deepseek-ai/dsh-session'
+import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 
 /**
  * 整张待办列表映射为一份替换式 plan。

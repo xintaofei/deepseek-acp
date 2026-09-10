@@ -23,6 +23,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Bridge } from '../bridge.js'
 import { invalidParams, internalError, resourceNotFound } from '../codec/errors.js'
 import { modeStateFor } from '../config/modes.js'
+import { AssistantStreamRelay } from '../mapping/assistant-stream.js'
 import { ToolPresenter } from '../presentation/presenter.js'
 import { ForkPointUnresolved, readForkPoint } from '../session/fork-point.js'
 import { sameWorkspace } from '../session/workspace-path.js'
@@ -119,7 +120,8 @@ export async function handleForkSession(
 
   const cwd = handle.cwd ?? params.cwd
   const presenter = new ToolPresenter(bridge.port.tools, bridge.warn, handle.agent)
-  const record = { acpSessionId: sessionId, seq, handle, cwd, presenter, inflight: undefined }
+  const stream = new AssistantStreamRelay()
+  const record = { acpSessionId: sessionId, seq, handle, cwd, presenter, stream, inflight: undefined }
   bridge.table.add(record)
 
   // 与 `session/new` 一样延后到应答之后：子会话 id 是这次应答**首次**告知客户端

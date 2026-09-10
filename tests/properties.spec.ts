@@ -15,8 +15,11 @@ import type { SessionUpdate } from '@agentclientprotocol/sdk'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
+import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm'
+import { AssistantStreamRelay } from '../src/mapping/assistant-stream.js'
 import { mapEvent, type MappingContext } from '../src/mapping/updates.js'
 import { ToolPresenter } from '../src/presentation/presenter.js'
+import { reasoningRun, replayStream, textRun } from './assistant-stream.js'
 
 /**
  * `mapEvent` 允许产出的全部变体。
@@ -41,6 +44,7 @@ const LEGAL_UPDATE_KINDS = new Set([
 type Action =
   | { kind: 'text'; text: string }
   | { kind: 'reasoning'; text: string }
+  | { kind: 'attempt'; text: string }
   | { kind: 'call'; id: string; name: string }
   | { kind: 'result'; idx: number; isError: boolean }
   | { kind: 'usage'; input: number; output: number; cacheRead: number }
@@ -60,6 +64,10 @@ function actionsArb(): fc.Arbitrary<Action[]> {
   const action: fc.Arbitrary<Action> = fc.oneof(
     { arbitrary: fc.string().map((text): Action => ({ kind: 'text', text })), weight: 1 },
     { arbitrary: fc.string().map((text): Action => ({ kind: 'reasoning', text })), weight: 1 },
+    // 一次废弃的尝试（流中途报错 / 被重试）。它与 `text` 产出同一种更新，但走的
+    // 是另一条事件——两条路径的 replay 行为必须一致，否则「重放只多出这几种」
+    // 那条不变量在有重试的会话上就不成立了。
+    { arbitrary: fc.string().map((text): Action => ({ kind: 'attempt', text })), weight: 1 },
     {
       arbitrary: fc
         .record({ id: fc.string({ minLength: 1 }), name: fc.string() })
@@ -111,22 +119,31 @@ function actionsToEvents(actions: Action[]): SessionEvent[] {
   const push = (event: unknown): void => {
     events.push(event as SessionEvent)
   }
+  /** 一条 `assistant/message`：紧凑流与用量都挂在它身上。 */
+  const assistantMessage = (data: { stream: unknown[]; usage?: unknown }): unknown => ({
+    type: 'assistant/message',
+    seq: 0,
+    time: 0,
+    surfaceOp: 'append',
+    data: { turn: 1, step: 1, message: { id: 'm', role: 'assistant', content: [] }, ...data },
+  })
   for (const a of actions) {
     switch (a.kind) {
+      // 助手文本与推理在日志里都是 `assistant/message` 随身带的**紧凑流**
+      // （0.1.5 起逐片事件不再落库），因此这两个动作产出的是同一种事件，
+      // 只有 run 的类型不同。
       case 'text':
-        push({
-          type: 'assistant/chunk',
-          seq: 0,
-          time: 0,
-          data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: a.text } },
-        })
+        push(assistantMessage({ stream: [textRun(a.text)] }))
         break
       case 'reasoning':
+        push(assistantMessage({ stream: [reasoningRun(a.text)] }))
+        break
+      case 'attempt':
         push({
-          type: 'assistant/chunk',
+          type: 'assistant/attempt',
           seq: 0,
           time: 0,
-          data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: a.text } },
+          data: { turn: 1, step: 1, stream: [textRun(a.text)] },
         })
         break
       case 'call':
@@ -159,14 +176,9 @@ function actionsToEvents(actions: Action[]): SessionEvent[] {
         break
       }
       case 'usage':
-        push({
-          type: 'assistant/message',
-          seq: 0,
-          time: 0,
-          data: {
-            turn: 1,
-            step: 1,
-            message: { id: 'm', role: 'assistant', content: [] },
+        push(
+          assistantMessage({
+            stream: [],
             usage: {
               inputTokens: a.input,
               outputTokens: a.output,
@@ -174,8 +186,8 @@ function actionsToEvents(actions: Action[]): SessionEvent[] {
               cacheWriteTokens: 0,
               reasoningTokens: 0,
             },
-          },
-        })
+          }),
+        )
         break
       case 'user':
         push({
@@ -325,21 +337,67 @@ describe('TC-PROP-03 映射是事件的纯函数（重放等于实时）', () =>
     )
   })
 
-  it('replay 只改变用户侧回显，不改变助手侧的任何一条', () => {
-    // 两个模式的差别必须**恰好**是 `user_message_chunk`（用户消息与命令行回显）。
-    // 多一条少一条都意味着重放出来的对话与当时不同——而那正是最难发现的那类
-    // 缺陷：它只在用户重开旧会话时才显形。
+  it('replay 只多出用户侧回显与助手分片，别的一条不差', () => {
+    // 两个模式的差别必须**恰好**是这三种：`user_message_chunk`（用户消息与命令行
+    // 回显）、以及从落库紧凑流展开出来的 `agent_message_chunk` /
+    // `agent_thought_chunk`。后两种在实时路径上由帧流发出，不经 `mapEvent`
+    // （见 src/mapping/assistant-stream.ts）。
+    //
+    // 除此之外多一条少一条，都意味着重放出来的对话与当时不同——而那正是最难
+    // 发现的那类缺陷：它只在用户重开旧会话时才显形。
+    const REPLAY_ONLY = new Set(['user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk'])
     fc.assert(
       fc.property(actionsArb(), (actions) => {
         const events = actionsToEvents(actions)
         const window = { contextWindow: () => 200_000 }
         const live = runStream(events, { ...window, replay: false })
         const replayed = runStream(events, { ...window, replay: true })
-        const withoutUser = (updates: SessionUpdate[]): SessionUpdate[] =>
-          updates.filter((u) => u.sessionUpdate !== 'user_message_chunk')
-        expect(withoutUser(replayed)).toEqual(withoutUser(live))
-        // 且方向是单调的：重放只会**多**出用户侧回显，不会少。
+        const shared = (updates: SessionUpdate[]): SessionUpdate[] =>
+          updates.filter((u) => !REPLAY_ONLY.has(u.sessionUpdate))
+        expect(shared(replayed)).toEqual(shared(live))
+        // 且方向是单调的：重放只会**多**，不会少。
         expect(replayed.length).toBeGreaterThanOrEqual(live.length)
+      }),
+    )
+  })
+})
+
+describe('TC-PROP-04 实时帧流与落库紧凑流念出同一段文字', () => {
+  it('任意一串 delta，两条路径产出的更新逐条相同', () => {
+    // 这条接替了老的「重放等于实时」：0.1.5 把助手分片拆成了两条载体（进程内
+    // 帧流 / 随消息落库的紧凑记录），同源性从「同一条事件」变成了「同一条规则」。
+    // 而**打包**是两者唯一的形状差异——紧凑流把连续同类 delta 并成一条 run，
+    // 于是重放发的是并好的整段，实时发的是逐片。两边拼起来必须一字不差。
+    const delta = fc.oneof(
+      fc.string().map((text) => ({ type: 'text-delta' as const, index: 0, text })),
+      fc.string().map((text) => ({ type: 'reasoning-delta' as const, index: 0, text })),
+    )
+    fc.assert(
+      fc.property(fc.array(delta, { maxLength: 30 }), (deltas) => {
+        // 实时：喂帧流中继。
+        const relay = new AssistantStreamRelay()
+        const attemptId = 's:1' as never
+        let revision = 0
+        const live: SessionUpdate[] = [
+          ...relay.frame({ type: 'start', attemptId, revision: ++revision, turn: 1, step: 1 }),
+        ]
+        // 落库：喂上游自己的累加器，拿到它真正会写进日志的那份紧凑记录。
+        // 自己手搓 run 只能测到「我以为它怎么打包」。
+        const accumulator = new AssistantStreamAccumulator()
+        for (const chunk of deltas) {
+          accumulator.push({ time: 0, chunk })
+          live.push(...relay.frame({ type: 'chunk', attemptId, revision: ++revision, index: 0, time: 0, chunk }))
+        }
+        const replayed = replayStream([...accumulator.snapshot()])
+
+        const textOf = (updates: readonly unknown[], kind: string): string =>
+          updates
+            .filter((u) => (u as { sessionUpdate: string }).sessionUpdate === kind)
+            .map((u) => (u as { content: { text: string } }).content.text)
+            .join('')
+        for (const kind of ['agent_message_chunk', 'agent_thought_chunk']) {
+          expect(textOf(replayed, kind), kind).toBe(textOf(live, kind))
+        }
       }),
     )
   })

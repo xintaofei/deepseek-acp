@@ -333,7 +333,19 @@ export async function createHarness(
       })
     },
   })
-  for (const plugin of [SystemPrompt, SessionService, LlmService, ToolRegistry, AgentRegistry, AgentLoop, ApprovalService]) {
+  // `SessionProjections` 在这份基础组合里不再可选：`AgentLoop` 现在 inject 它
+  // （回合边界投影归它注册）。缺席时 loop 不会启动、也不报错——`session/new`
+  // 会以「no agent factory registered」失败，而那条信息读起来像是漏挂了 loop。
+  for (const plugin of [
+    SystemPrompt,
+    SessionService,
+    LlmService,
+    ToolRegistry,
+    SessionProjections,
+    AgentRegistry,
+    AgentLoop,
+    ApprovalService,
+  ]) {
     await ctx.plugin(plugin, {})
   }
   if (options.sessionsRoot !== undefined) {
@@ -375,12 +387,8 @@ export async function createHarness(
     await ctx.plugin(UserQuestions)
     await ctx.plugin(AskUserTool)
   }
-  if (options.planMode === true) {
-    // plan-mode 会往 `sessionProjections` 注册一个投影单元（没挂就跳过），
-    // 挂上它让这条链与部署组合一致。
-    await ctx.plugin(SessionProjections)
-    await ctx.plugin(PlanMode, { section: 'TEST PLAN SECTION' })
-  }
+  // plan-mode 会往 `sessionProjections` 注册一个投影单元；那个服务已在基础组合里。
+  if (options.planMode === true) await ctx.plugin(PlanMode, { section: 'TEST PLAN SECTION' })
   // 默认用 `local`：终端卡片那条链跟哪个 executor 无关，而沙箱后端要做平台
   // 探测、探测不到就 fail-closed——让全部用例都背上平台依赖换不来覆盖。只有
   // 明确要测拒绝/提权的用例才要 `sandbox`。
@@ -554,8 +562,8 @@ export async function createHarness(
       const deadline = Date.now() + timeoutMs
       for (;;) {
         try {
-          const headers = await persistence.list()
-          if (headers.some((h) => String(h.id) === sessionId)) return
+          const snapshots = await persistence.list()
+          if (snapshots.some((s) => String(s.header.id) === sessionId)) return
         } catch (error: unknown) {
           // The atomic directory publisher can expose its temporary directory
           // to list() just before renaming it. Retry only that transient race.

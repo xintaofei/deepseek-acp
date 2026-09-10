@@ -14,11 +14,16 @@ import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import { SANDBOX_MODES, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { ReasoningEffortId, createUserMessage, type LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
-// 侧效应类型导入：把 `sessionPersistence` 合并到 Context 的服务表上。本 port
-// 只 inject `agents`，持久化通过 `ctx.get` 走可选路径；没有这行 `get` 的返回
-// 值是 any，下面的 header 映射会静默失去类型检查。
-import type {} from '@deepseek-ai/dsh-session-persistence'
+import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+// 分叉时要给出继承前缀的长度，而那是个 branded number：裸 `seed.length` 编译不过。
+import { SessionLogOffset } from '@deepseek-ai/dsh-session'
+// 这一行同时干两件事：把 `sessionPersistence` 合并到 Context 的服务表上（本 port
+// 只 inject `agents`，持久化走 `ctx.get` 这条可选路径；没有它 `get` 的返回值是
+// any，下面的 header 映射会静默失去类型检查），以及给 `readStored` 一个入参类型。
+import type SessionPersistence from '@deepseek-ai/dsh-session-persistence'
+// 「会话不存在」现在是个**类型**而不是一句错误文案。`presence` 的分诊靠它，
+// 见下面那段注释。
+import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 // 这个不是纯类型导入：`foldSessionTitle` 是个不依赖服务的纯函数，日志里没有
 // 标题事件时它返回 undefined，因此组合没挂标题服务时照样安全。
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
@@ -29,12 +34,14 @@ import type {} from '@deepseek-ai/dsh-plan-mode'
 // 技能注册表同样是可选组合件。这一行**不是**纯类型导入：`isUserInvocable` 是个
 // 读 `invocation.userInvocable` 的纯函数谓词，自己判等于把上游的策略规则抄一遍。
 import { isUserInvocable } from '@deepseek-ai/dsh-skill'
-// provider 配置面（`providers/*`）用得到的两个纯函数构造器：设置服务的命名空间、
-// 凭据引用。两者都不引入服务依赖。
+// provider 配置面（`providers/*`）用得到的纯函数构造器：凭据引用。不引入服务依赖。
+//
+// 设置服务那边**不再需要一个构造器**：命名空间的校验从运行时的 `settingsNamespace()`
+// 换成了模板字面量类型（`SettingsNamespaceInput`），字面量在编译期就校验，而
+// `entry.settingsNs` 这种 `string` 原样收下——它来自适配器目录，不是我们拼的。
 //
 // 线协议词表**不在这里静态 import**：它归 `dsh-llm-pi-ai` 所有，而那个包 import
 // 一次要 5 秒，静态引用会把这 5 秒加到每一次启动上。改走惰性加载器。
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { ensurePiAi, loadPiAi } from '../composition/pi-ai.js'
 import { admitEncodedImages } from '@deepseek-ai/dsh-attachment'
@@ -135,6 +142,34 @@ async function mapWithLimit<T, R>(
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
   return results
+}
+
+/**
+ * 读一条已落盘会话的完整日志。
+ *
+ * 上游把「读一条日志」从服务级的 `inspect()` 换成了**逐会话句柄**：`open(id,
+ * 'read')` 要一条只读通道，`read()` 取事件，用完 `close()`。三步收在这里，
+ * 是因为四个调用点各写一遍 try/finally，迟早有一个漏掉 close ——读句柄不占
+ * 写所有权，但仍持有后端资源。
+ *
+ * **`'read'` 而非 `'write'`**：只是要把历史念给客户端听，不该顺手取得写所有权
+ * ——那会把同一条会话正开着的写句柄挤掉。这也是旧代码选 `inspect` 而非 `load`
+ * 的同一条理由，只是现在由 access 参数直接表达。
+ * @param persistence - 持久化后端
+ * @param sessionId - 会话 id
+ * @returns 存储元数据与按 seq 升序的完整事件
+ */
+async function readStored(
+  persistence: SessionPersistence,
+  sessionId: SessionId,
+): Promise<{ readonly meta: SessionHeader; readonly events: readonly SessionEvent[] }> {
+  const handle = await persistence.open(sessionId, 'read')
+  try {
+    const { events } = await handle.read()
+    return { meta: handle.header, events }
+  } finally {
+    await handle.close()
+  }
 }
 
 /**
@@ -426,15 +461,15 @@ export function createInProcessPort(ctx: Context): HarnessPort {
       ? undefined
       : {
           async list(): Promise<SessionSummary[]> {
-            const headers = await persistence.list()
+            const snapshots = await persistence.list()
             // header 里没有标题，也没有「最后活动时间」，两者都只能从日志折出来
             // ——于是列表要把每条日志读一遍。这是有代价的，但会话选择器不给标题
             // 就只剩一串 id，那正是这个功能唯一要回答的问题。并发有上限，
             // 单条读失败不影响其余条目。
-            return await mapWithLimit(headers, LIST_READ_CONCURRENCY, async (header) => {
+            return await mapWithLimit(snapshots, LIST_READ_CONCURRENCY, async ({ header }) => {
               const base = { sessionId: header.id, cwd: header.cwd, createdAt: header.createdAt }
               try {
-                const { events } = await persistence.inspect(header.id)
+                const { events } = await readStored(persistence, header.id)
                 return {
                   ...base,
                   title: foldSessionTitle(events)?.title,
@@ -448,35 +483,34 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             })
           },
           async events(sessionId: SessionId): Promise<readonly SessionEvent[]> {
-            // `inspect` 而非 `load`：后者会对中断的尾回合提交冷恢复（写盘）。
-            // 只是要把历史念给客户端听，不该顺手改动日志。
-            const inspection = await persistence.inspect(sessionId)
-            return inspection.events
+            // 只读句柄：把历史念给客户端听，不改动日志、也不取写所有权。
+            return (await readStored(persistence, sessionId)).events
           },
           async presence(sessionId: SessionId): Promise<SessionPresence> {
-            // 上游对「会话不存在」抛的是一个**裸 `Error`**，消息是
-            // `session "..." not found`，没有错误码也没有类型。靠匹配那句话来
-            // 分诊，等于把一条错误信息的措辞当成 API——上游哪天改了文案，我们
-            // 会**静默**退回「一律 Internal error」，而且没有任何用例会发现。
-            // 所以这里独立问一次。
+            // 独立问一次，不去解读别处那个失败：恢复失败的来路太多（建 agent、
+            // 挂 MCP、读日志），从中反推「会话在不在」只会把别人的故障算到会话头上。
             //
-            // **不能拿 `list()` 当判据**：JSONL 后端在列举时会静默跳过空文件与
-            // 解析不了的头部（`listArtifacts` 里两处 `continue`），于是一条头部
-            // 损坏的会话在清单里根本不出现。实测同一条会话 `list()` 返回 `[]`、
-            // `inspect()` 抛 `corrupt session log: header line is not valid JSON`
-            // ——照清单判，就会把「日志坏了」说成「会话没了」，而那正是这套分诊
-            // 最该避免的那个误判。
+            // **不能拿 `list()` / `stat()` 当判据。** 两者都会静默跳过读不懂的
+            // 物件：JSONL 后端列举时对空文件与解析不了的头部直接 `continue`，
+            // 而 `stat` 同样按元数据挑选。于是一条**头部损坏**的会话在它们眼里
+            // 与「不存在」一模一样——照那个判，就会把「日志坏了」说成「会话没了」，
+            // 客户端据此把用户的历史从列表里摘掉。这正是这套分诊最该避免的误判，
+            // 实测也确实复现过。
             //
-            // `readRaw` 才是能把两者分开的那个接口，上游写得很明确：「调用方先测
-            // `supportsRawArtifacts`，此时 `undefined` **只**表示这个会话没有已
-            // 物化的物件」。它还是**逐 id** 的（内部 `findLog(id)`），不存在的
-            // 会话在读任何字节之前就返回了。
-            if (!persistence.supportsRawArtifacts) return 'unknown'
+            // `open(id, 'read')` 才把两者分开，而且是**类型**分开的：不存在抛
+            // `SessionPersistenceNotFoundError`，头部损坏抛
+            // `SessionPersistenceCorruptionError`。只有前者允许改判。
+            //
+            // `'read'` 而非 `'write'`：探测不该抢走一条正开着的会话的写所有权。
             try {
-              return (await persistence.readRaw(sessionId)) === undefined ? 'absent' : 'present'
-            } catch {
-              // 读不出来就不改判。这里**不**断言「物件一定在」——根目录编码不符、
-              // 目录读不动都会走到这儿——但两种情形要的处理是同一个：保持原样。
+              const handle = await persistence.open(sessionId, 'read')
+              await handle.close()
+              return 'present'
+            } catch (error: unknown) {
+              if (error instanceof SessionPersistenceNotFoundError) return 'absent'
+              // 别的失败一律不改判。这里**不**断言「物件一定在」——损坏、根目录
+              // 编码不符、目录读不动都会走到这儿——但三种情形要的处理是同一个：
+              // 保持原样，让原错误照常浮上去。
               return 'present'
             }
           },
@@ -667,10 +701,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             }
             // `update` 是**深合并**进用户段，因此不会碰同段里别的 provider，也不会
             // 碰这条 profile 上我们没提到的字段（models、retryPolicy…）。
-            await settings.update(
-              settingsNamespace(entry.settingsNs),
-              nest(path, profile) as never,
-            )
+            await settings.update(entry.settingsNs, nest(path, profile) as never)
           },
           async disable(id) {
             await ensurePiAi(ctx)
@@ -682,9 +713,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             // **`mutate` 的 unset 而不是 `replace`**：我们手上只有一份脱敏视图，
             // 用它重建整段再整体写回，会把线上从未返回过的每一个密钥一并删掉
             // ——包括同段里其它 provider 的。op 只点名它要删的那一条。
-            await settings.mutate(settingsNamespace(entry.settingsNs), [
-              { op: 'unset', path: [...entry.settingsPath] },
-            ])
+            await settings.mutate(entry.settingsNs, [{ op: 'unset', path: [...entry.settingsPath] }])
           },
         }
 
@@ -763,13 +792,12 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           },
           // 工作区取自**日志里的 header**，不取请求参数：cwd 是不可变会话
           // 元数据，用请求里的那个会让恢复出来的会话在别的工作区跑历史。
-          setup: async (agentCtx: Context) => {
-            await setupSession(
-              agentCtx.agent?.session.header.cwd,
-              mcpServers,
-              selection,
-              readDelegate,
-            )(agentCtx)
+          //
+          // header 从 setup 的**第二个形参**读，不从 `agentCtx` 上摸：装配期
+          // 的 agent 尚未发布，`ctx.agent` 那条服务路径此刻本就是空的（上游现在
+          // 干脆不再提供它），而工厂把待发布的 agent 直接递进来了。
+          setup: async (agentCtx: Context, agent: Agent) => {
+            await setupSession(agent.session.header.cwd, mcpServers, selection, readDelegate)(agentCtx)
           },
         })
         return {
@@ -784,16 +812,16 @@ export function createInProcessPort(ctx: Context): HarnessPort {
         // （`writeBatchMaxDelayMs`），刚说完的那句话可能还在缓冲里没落盘。从盘上
         // 读会静默丢掉最后几条——fork 出来的会话少了刚刚那轮对话，而且看不出来。
         const liveParent = agents.get(parentSessionId)?.session
-        // 落盘那条路径**只读一次**：`inspect` 读的是整份日志，事件与 cwd 各读一次
-        // 就是把一个几百轮的会话解析两遍。
+        // 落盘那条路径**只开一次句柄**：一次 `readStored` 同时给出事件与 header，
+        // 分开读就是把一个几百轮的会话解析两遍。
         const stored =
           liveParent !== undefined || persistence === undefined
             ? undefined
-            : await persistence.inspect(parentSessionId)
+            : await readStored(persistence, parentSessionId)
         const parentCwd = liveParent?.header.cwd ?? stored?.meta.cwd
         // 分叉点也在这里解析，理由与上面同源：协议层看不到**活**会话的事件，
         // 让它自己再读一遍盘，读到的还会是少了最后几条的那份。
-        const seed = forkSeed(liveParent?.events ?? stored?.events ?? [], forkPoint)
+        const seed = forkSeed(liveParent?.snapshotEvents() ?? stored?.events ?? [], forkPoint)
 
         const selection = initialSelection(provider, model)
         // **`agents.create` 而不是 `ctx.sessions.fork`。** 后者看起来更贴切，但它
@@ -806,12 +834,23 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           sessionId,
           meta: {
             ...(parentCwd === undefined ? {} : { cwd: parentCwd }),
-            // 血缘写进 header，因此它随日志落盘、也随恢复回来。这不只是元数据：
-            // `seedLength` 让恢复与重放分得清哪一段是继承来的、哪一段是这条会话
-            // 自己写的。
+            // 血缘写进 header，因此它随日志落盘、也随恢复回来。
             parentSession: parentSessionId,
-            seedLength: seed.length,
+            // `isSeeded` 是 header 上的**标记**，继承前缀的长度则搬到了 header
+            // 之外的 `inheritedEventCount`（上游把「有没有 fork 血缘」与「继承了
+            // 多少条」拆开了：前者是可重放的会话元数据，后者是存储侧的切点）。
+            //
+            // 两者要么都给、要么都不给：置了 `isSeeded` 却不给长度，会话边界直接
+            // 拒（`seeded session requires an inherited event count`）；反过来给了
+            // 非零长度却不置标记，同样拒。
+            //
+            // **种子为空时两个都不给。** fork 一条还没说过话的会话是合法的
+            // （客户端从列表里挑一条刚建的），而那条子会话并没有继承任何前缀
+            // ——标上 `isSeeded` 会让它在日志开头多一个 `session/end-seed`
+            // `{inherited: true}` 标记，宣称一段并不存在的继承历史。
+            ...(seed.length === 0 ? {} : { isSeeded: true }),
           },
+          ...(seed.length === 0 ? {} : { inheritedEventCount: SessionLogOffset(seed.length) }),
           seed,
           agentOptions: {
             ...(provider !== undefined ? { provider } : {}),
@@ -843,6 +882,11 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           const agent = agents.get(session.header.id)
           if (agent === undefined || agent.session !== session) return
           sink(agent, event)
+        })
+      },
+      onAssistantStream(sink) {
+        return ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+          sink(agent, frame)
         })
       },
       onInboxClaimed(sink) {

@@ -8,7 +8,7 @@
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   ALLOW_OPTION_ID,
@@ -119,7 +119,7 @@ describe('TC-APPR-03 经真实 waterfall 的端到端', () => {
       outcome = await h.ctx.approval.request({
         agent,
         toolName: 'bash',
-        callId: CallId('call-1'),
+        callId: ToolCallId('call-1'),
       })
     }
     await h.acp.request('session/prompt', {
@@ -168,7 +168,7 @@ describe('TC-APPR-03 经真实 waterfall 的端到端', () => {
     // 卸载会释放 agent，故这里只断言应答器已摘除：请求不再到达客户端
     const before = h.permissionRequests.length
     await h.ctx.approval
-      .request({ agent, toolName: 'bash', callId: CallId('call-2') })
+      .request({ agent, toolName: 'bash', callId: ToolCallId('call-2') })
       .catch(() => 'threw')
     expect(h.permissionRequests.length, '卸载后不得再打扰客户端').toBe(before)
   })

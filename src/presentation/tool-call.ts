@@ -9,7 +9,7 @@
  */
 
 import type { SessionUpdate, ToolCallUpdate, ToolCallLocation, ToolKind } from '@agentclientprotocol/sdk'
-import type { CallId } from '@deepseek-ai/dsh-llm'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { FileLocation, ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import { toolResultContent } from '../codec/content.js'
 import { displayTitle, relativizeLocations } from './paths.js'
@@ -54,7 +54,7 @@ function acpLocations(locations: readonly FileLocation[] | undefined): ToolCallL
  * @returns `tool_call` 更新
  */
 export function toolCallUpdate(
-  callId: CallId,
+  callId: ToolCallId,
   view: ToolCallView,
   terminal: TerminalRendering = NO_TERMINAL,
 ): ToolCallSessionUpdate {
@@ -137,7 +137,7 @@ export function toolCallUpdate(
  * @returns `tool_call_update` 更新
  */
 export function toolResultUpdate(
-  callId: CallId,
+  callId: ToolCallId,
   view: ToolResultView,
   isError: boolean,
   terminal: TerminalRendering = NO_TERMINAL,

@@ -7,8 +7,8 @@
  * @module
  */
 
-import type { CallId, ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { ContentBlock, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { ScopeKey } from '@deepseek-ai/dsh-scope'
@@ -71,7 +71,7 @@ export class ToolPresenter {
    * @param argsJson - 原始参数字符串
    * @returns 工具声明的视图，或通用兜底
    */
-  call(callId: CallId, name: string, argsJson: string): ToolCallView {
+  call(callId: ToolCallId, name: string, argsJson: string): ToolCallView {
     const args = parseToolArguments(argsJson)
     let declared: ToolCallView | undefined
     try {
@@ -94,7 +94,7 @@ export class ToolPresenter {
    * @param meta - 工具私有的呈现负载
    * @returns 归一化后的视图
    */
-  result(callId: CallId, content: ContentBlock[], isError: boolean, meta?: JsonValue): ToolResultView {
+  result(callId: ToolCallId, content: ContentBlock[], isError: boolean, meta?: JsonValue): ToolResultView {
     const call = this.pending.get(callId)
     this.pending.delete(callId)
     // 没有对应调用（未知或迟到的 callId）——无从呈现，原样给内容。

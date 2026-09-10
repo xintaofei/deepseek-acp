@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest'
 import { join, resolve } from 'node:path'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import { harnessBlockToAcpContent } from '../src/codec/content.js'
 import { mapEvent } from '../src/mapping/updates.js'
@@ -18,7 +18,7 @@ import { displayTitle, insideWorkspace } from '../src/presentation/paths.js'
 import { terminalCwd } from '../src/presentation/terminal.js'
 import { NO_TERMINAL, toolCallUpdate, toolResultUpdate } from '../src/presentation/tool-call.js'
 
-const CID = CallId('call-1')
+const CID = ToolCallId('call-1')
 const WS = resolve('work', 'repo')
 const FILE = join(WS, 'a.ts')
 const SOURCE_FILE = join(WS, 'src', 'a.ts')
@@ -80,7 +80,7 @@ describe('TC-PRE-01 呈现器解析工具声明', () => {
 
   it('结果找不到对应调用（迟到或未知 callId）时给原始内容', () => {
     const p = new ToolPresenter(registry({}))
-    expect(p.result(CallId('ghost'), [{ type: 'text', text: 'x' }], false)).toEqual({
+    expect(p.result(ToolCallId('ghost'), [{ type: 'text', text: 'x' }], false)).toEqual({
       card: 'generic',
       content: [{ type: 'text', text: 'x' }],
     })

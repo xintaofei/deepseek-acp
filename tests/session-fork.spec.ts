@@ -131,6 +131,32 @@ describe('TC-FORK-03 父子独立', () => {
   }, 30_000)
 })
 
+describe('TC-FORK-07 fork 一条还没说过话的会话', () => {
+  it('零事件的父会话照样 fork 得出来，子会话能正常对话', async () => {
+    // 客户端从会话列表里挑一条**刚建好**的去分叉是完全正常的用法，而那条会话
+    // 一个事件都没有。本文件其余用例都先聊过一轮，所以空种子这条路径此前一个
+    // 都没走到——而它恰恰是 `seed` / `isSeeded` / `inheritedEventCount` 三者
+    // 取值最边缘的一处（种子是空数组而非缺席，前缀长度是 0）。
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-ws-')
+    const { sessionId: parent } = await h.acp.request('session/new', { cwd, mcpServers: [] })
+
+    const forked = await h.acp.request('session/fork', {
+      sessionId: parent as never,
+      cwd,
+      mcpServers: [],
+    })
+    expect(String(forked.sessionId)).not.toBe(String(parent))
+
+    const response = await h.acp.request('session/prompt', {
+      sessionId: String(forked.sessionId) as never,
+      prompt: [{ type: 'text', text: '第一句话' }],
+    })
+    expect(response.stopReason).toBe('end_turn')
+    h.disposeBridge()
+  }, 30_000)
+})
+
 describe('TC-FORK-04 fork 一条没打开的会话', () => {
   it('父会话只在磁盘上时照样能 fork，历史从日志继承', async () => {
     const root = realTempDir('dsacp-root-')

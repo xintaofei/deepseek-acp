@@ -20,6 +20,7 @@ import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import LlmService from '@deepseek-ai/dsh-llm'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
+import type { DeepSeekCatalogModel } from '@deepseek-ai/dsh-llm-deepseek'
 import PlanMode from '@deepseek-ai/dsh-plan-mode'
 import * as RepeatToolReminder from '@deepseek-ai/dsh-repeat-tool-reminder'
 import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
@@ -112,8 +113,59 @@ export function sessionsRoot(env: NodeJS.ProcessEnv): string {
  */
 export const DEFAULT_PROVIDER = 'deepseek-official'
 
-/** 默认模型：对话延迟最低的一档，联调用它最省时间。 */
-export const DEFAULT_MODEL = 'deepseek-v4-flash'
+/**
+ * 默认模型：DeepSeek-V4.1-Flash。
+ *
+ * 官方定价页给它的定位是「各项指标全面超越 V4 Pro」，且更快更便宜——编辑器里
+ * 的默认档没有理由是别的。它同时**收图片**，这一条把原先「默认模型不收图、发图
+ * 要先去选择器换成 vision 模型」那条绕路整个消掉了。
+ */
+export const DEFAULT_MODEL = 'deepseek-flash'
+
+/**
+ * 本部署 advertise 的 DeepSeek 模型目录。
+ *
+ * **为什么要覆盖而不是吃适配器的默认**：`dsh-llm-deepseek` 的内置目录里仍留着
+ * `deepseek-v4-flash` 与 `deepseek-v4-flash-vision-exp` 两个**已下线**的 id。
+ * 它们还能调通（官方把请求转给 V4.1 Flash 并按 Flash 计费），但摆进模型选择器
+ * 是两重误导：用户以为自己在选一个不同的模型，而目录里 `deepseek-v4-flash` 声明
+ * 的是**纯文本**——于是在一个实际收图的后端上，我们会拿着过时的目录去拒绝用户
+ * 的图片，还劝他换成另一个同样已下线的 id。
+ *
+ * 因此这里只列官方定价页上还活着的两条。目录是**建议性**的：它决定选择器里有
+ * 什么、以及图片准入怎么判，不限制 `DEEPSEEK_ACP_MODEL` 能填什么——要用某个
+ * 老 id 或内部灰度模型，环境变量照样直通。
+ *
+ * 未列出的字段一律吃适配器默认，与它自己那份条目逐字一致：`contextWindow` 回落
+ * 到 `defaultContextWindow`（1M，与定价页相同），图片预算回落到 640k 像素 / 1MiB。
+ * `maxTokens` 同样不动——定价页写的 384K 是**上限**，而适配器选的 256K 已经远超
+ * 一次编码回答的量级，把上限拉满只会抬高单轮的最坏成本。
+ *
+ * @see https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+ */
+export const DEEPSEEK_MODELS: DeepSeekCatalogModel[] = [
+  {
+    id: DEFAULT_MODEL,
+    name: 'DeepSeek-V4.1-Flash',
+    description: '更快更省，且在各项指标上超越 V4 Pro；支持图像理解。日常编码的默认档。',
+    inputModalities: ['text', 'image'],
+    // 上游给这条路由标的就是 `in-history`（系统提示随历史更新而不是每次整段
+    // 重发）。覆盖目录时漏掉它不会报错，只会让这个模型**静默**退回另一种系统
+    // 提示投递方式——所以照抄，不省。
+    systemPromptUpdate: 'in-history',
+  },
+  {
+    id: 'deepseek-v4-pro',
+    // 定价页那一行的版本名是 `DeepSeek-V4-Pro-0813`。这里**去掉快照后缀**：
+    // 选择器里显示的是「选哪个模型」，而 `0813` 是同一个模型的哪一版快照——
+    // id 不带它，官方也随时可能把它指向新快照。上游自带目录的写法同此。
+    name: 'DeepSeek-V4-Pro',
+    // 留着它是因为**此刻它还在**，而不是因为它更强。官方已宣布有序下线：
+    // 2026-09-14 12:00（北京时间）起，在 V4.1 Pro 发布之前，这个 id 的请求会
+    // 全部路由到 V4.1 Flash 并按 Flash 计费。到那天之后它就该从这份目录里去掉。
+    description: '旧的高价档，官方已宣布有序下线；除非有特定理由，优先用 Flash。',
+  },
+]
 
 /** 从环境变量读取配置，缺省值集中在此。 */
 export interface LauncherEnv {
@@ -155,7 +207,9 @@ export async function composeAgent(
   options: { sessionsRoot: string; lspServers?: Readonly<Record<string, LspServerSpec>> },
 ): Promise<void> {
   // 组合中不得挂 stdout logger —— stdout 属于协议。
-  await ctx.plugin(SystemPrompt, { persona: PERSONA })
+  // `personaPrefix`（不再是 `persona`）：上游把部署人设拆成了前后两段，前段排在
+  // 一方指导之前、后段排在其后。我们的这段讲的是「这个部署是什么」，属于前段。
+  await ctx.plugin(SystemPrompt, { personaPrefix: PERSONA })
   for (const plugin of [SessionService, LlmService, ToolRegistry, AgentRegistry, AgentLoop]) {
     await ctx.plugin(plugin, {})
   }
@@ -383,7 +437,11 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   // 未配置时报告的正是 `high`。写出来是为了让「部署选了哪一档」在组合里是一句
   // 明文，而不是一条要读两个包才推得出来的默认值链——这个默认值直接决定每次
   // 请求的延迟与 token 开销，不该藏着。
-  await ctx.plugin(LlmDeepSeek, { reasoningEffort: 'high' })
+  //
+  // 模型目录同样显式给出——理由见 {@link DEEPSEEK_MODELS}：适配器自带的那份还
+  // 留着两个已下线的 id，其中一个还声明成纯文本，会让我们在一个实际收图的后端
+  // 上拒掉用户的图片。
+  await ctx.plugin(LlmDeepSeek, { reasoningEffort: 'high', models: DEEPSEEK_MODELS })
   // ── 用户设置文档：多 provider 的配置面 ────────────────────────────────
   //
   // 挂**具体 provider**（`settings-file`）而不是 `dsh-settings` —— 后者导出的

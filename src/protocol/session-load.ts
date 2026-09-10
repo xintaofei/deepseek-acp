@@ -13,6 +13,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Bridge } from '../bridge.js'
 import { invalidParams, internalError, methodNotFound } from '../codec/errors.js'
 import { modeStateFor } from '../config/modes.js'
+import { AssistantStreamRelay } from '../mapping/assistant-stream.js'
 import { mapEvent } from '../mapping/updates.js'
 import { ToolPresenter } from '../presentation/presenter.js'
 import type { SessionRecord } from '../session/table.js'
@@ -112,6 +113,7 @@ export async function restoreSession(
     handle,
     cwd,
     presenter,
+    stream: new AssistantStreamRelay(),
     inflight: undefined,
   }
   bridge.table.add(record)

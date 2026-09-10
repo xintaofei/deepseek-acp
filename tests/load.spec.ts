@@ -43,7 +43,14 @@ async function recordSession(
   // `reportBackgroundFailure` 就是），不抛给调用方——不看这里，一次「写失败并重试」
   // 的表现就只是稍后恢复时一句没头没尾的 `Internal error`。这条断言把错误本身
   // 印在失败消息里，让下次复现自己说出原因。
-  const trouble = h.logs.filter((l) => l.type === 'warn' || l.type === 'error')
+  //
+  // `local-subprocess-runtime` 例外：它在启动时报一句**平台能力**告知（macOS 没有
+  // 持久进程范围所有者，进程树围栏因此弱一档），每次挂 shell 都会有，与本次录制
+  // 发生了什么无关。不排除它就等于把这条断言在所有带 shell 的用例上永久钉红——
+  // 只按名字排除一个已知发声者，别的 warn 照样让用例失败。
+  const trouble = h.logs.filter(
+    (l) => (l.type === 'warn' || l.type === 'error') && l.name !== 'local-subprocess-runtime',
+  )
   expect(trouble.map((l) => `[${l.type}] ${l.name}: ${l.text}`), '录制期出现后台失败').toEqual([])
   return { sessionId: String(sessionId), updates: h.updates, raw }
 }
@@ -86,22 +93,34 @@ describe('TC-LOAD-01 历史重放', () => {
     h.disposeBridge()
   }, 30_000)
 
-  it('重放给出的 messageId 与实时流那次逐条相同', async () => {
+  it('重放给出的 messageId 与实时流那次相同，文本也逐字相同', async () => {
     // 客户端在实时流里记下一个 messageId，可能过几天、重开编辑器之后才拿它去
     // `session/fork`。两条路径给出不同的 id，那次分叉就会以「找不到这条消息」
-    // 失败——而两边走的本来就是同一个 `mapEvent`，这条用例守的是它别被拆开。
+    // 失败。0.1.5 起两条路径不再是同一条事件（实时走进程内帧流、重放走随消息
+    // 落库的紧凑流），这条用例因此从「守着别被拆开」变成「守着拆开之后仍相等」。
+    //
+    // 断的是 **id 集合与拼接文本**，不是分片条数：紧凑流把连续同类 delta 并成
+    // 一条 run，重放于是发并好的整段而实时发逐片。客户端两边都是接起来显示，
+    // 拿条数当判据只会把一个正确的实现钉死在一种打包方式上。
     const root = realTempDir('dsacp-load-')
     const cwd = realTempDir('dsacp-ws-')
-    const ids = (updates: readonly Record<string, unknown>[]): unknown[] =>
-      updates.filter((u) => u['sessionUpdate'] === 'agent_message_chunk').map((u) => u['messageId'])
+    const chunks = (updates: readonly Record<string, unknown>[]): Record<string, unknown>[] =>
+      updates.filter((u) => u['sessionUpdate'] === 'agent_message_chunk')
+    const ids = (updates: readonly Record<string, unknown>[]): Set<unknown> =>
+      new Set(chunks(updates).map((u) => u['messageId']))
+    const text = (updates: readonly Record<string, unknown>[]): string =>
+      chunks(updates)
+        .map((u) => (u['content'] as { text?: string }).text ?? '')
+        .join('')
 
     const { sessionId, raw: live } = await recordSession(root, cwd, { deltas: ['前情', '提要'] })
     const { h, raw } = await loadInto(root, sessionId, cwd)
 
-    expect(ids(live).length, '录制期本该有助手分片').toBeGreaterThan(0)
+    expect(chunks(live).length, '录制期本该有助手分片').toBeGreaterThan(0)
     expect(ids(raw)).toEqual(ids(live))
+    expect(text(raw)).toBe(text(live))
     // 同一条消息的分片共享一个 id —— ACP 对这个字段的语义就是「值变了即新消息」。
-    expect(new Set(ids(live)).size).toBe(1)
+    expect(ids(live).size).toBe(1)
     h.disposeBridge()
   }, 30_000)
 
@@ -136,6 +155,59 @@ describe('TC-LOAD-01 历史重放', () => {
     // 重新建立了 call→result 的关联，而不是退化成一张裸文本卡。
     expect((done?.['_meta'] as { terminal_output?: { data?: string } })?.terminal_output?.data).toContain('replayed')
     h.disposeBridge()
+  }, 30_000)
+
+  it('吐了半句话再重试的一步：恢复出来的与当时看到的逐字相同', async () => {
+    // 这条守的是 0.1.5 拆开实时/落库两条载体之后最容易漏的那个缺口。
+    //
+    // 一次模型请求中途以 error finish 收尾、随后被重试时，上游把废弃的那次记成
+    // `assistant/attempt`（带着它**已经发出去的**分片），成功那次记成
+    // `assistant/message`。两次共用同一个 `<turn>:<step>`——loop 在重试循环
+    // 外面就捕获了 turn/step。
+    //
+    // 于是：实时路径下客户端两次都收到了分片（帧流不区分尝试成不成），而重放
+    // 如果只展开 `assistant/message`，恢复出来的对话就会**少掉那半句**。少一段
+    // 不会报错、不会有任何用例自己变红，只会让用户重开会话后发现内容变了。
+    const root = realTempDir('dsacp-load-')
+    const cwd = realTempDir('dsacp-ws-')
+
+    const h = await createHarness({ sessionsRoot: root })
+    const live: Record<string, unknown>[] = []
+    h.onUpdate((u) => live.push(u as Record<string, unknown>))
+    // 让第一次尝试真的被重试。真实部署里这个监听器由 `dsh-llm-retry` 或
+    // `dsh-compaction-basic`（上下文溢出后压缩再来一次）提供；用例自己挂一个
+    // 是为了让这个形状**确定地**发生，而不是靠撞一次网络抖动。
+    let retried = false
+    h.ctx.on('agent/request-error', (_payload, next) => {
+      if (retried) return next()
+      retried = true
+      return Promise.resolve({ kind: 'retry' as const })
+    })
+
+    const { sessionId } = await h.acp.request('session/new', { cwd, mcpServers: [] })
+    h.llm.deltas = ['半句']
+    h.llm.errorFinishOnce = { message: 'stream died mid-flight', code: 'PROVIDER_ERROR' }
+    await h.acp.request('session/prompt', {
+      sessionId: sessionId as never,
+      prompt: [{ type: 'text', text: '说点什么' }],
+    })
+    h.disposeBridge()
+    await waitFor(() => !h.hasAgent(String(sessionId)), 5_000, 'agent teardown')
+    await h.retire()
+
+    // 前提自检：重试确实发生了，且客户端确实两次都收到了分片。这两条不成立的
+    // 话，下面那个相等就是两个空数组相等，用例永远绿。
+    expect(retried, '第一次尝试应当被重试').toBe(true)
+    const text = (updates: readonly Record<string, unknown>[]): string =>
+      updates
+        .filter((u) => u['sessionUpdate'] === 'agent_message_chunk')
+        .map((u) => (u['content'] as { text?: string }).text ?? '')
+        .join('')
+    expect(text(live), '实时应当既有废弃那次的半句、也有重来那次的').toBe('半句半句')
+
+    const { h: restored, raw } = await loadInto(root, String(sessionId), cwd)
+    expect(text(raw)).toBe(text(live))
+    restored.disposeBridge()
   }, 30_000)
 
   it.skipIf(process.platform !== 'win32')('Windows 可恢复历史 bash 调用并在下一回合使用 pwsh', async () => {

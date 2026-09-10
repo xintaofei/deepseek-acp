@@ -20,8 +20,16 @@ import { realTempDir } from './temp-dir.js'
 const ID = 'cmp-1'
 
 /** 造一条压缩日志事件。 */
-const event = (type: string, data: Record<string, unknown>): SessionEvent =>
-  ({ type, data: { compactionId: ID, ...data } }) as never
+/**
+ * 一条合成的压缩事件。
+ *
+ * `seq` 不能省：把事件喂上总线时，`session-projection` 也挂在 `session/event`
+ * 上，而它拿 `event.seq` 推进自己的游标——缺席时它算出 NaN 并抛
+ * `SessionSeq must be a non-negative safe integer`，表现是这条用例在一个与压缩
+ * 毫无关系的地方炸掉。纯函数路径不看这个字段，给个默认值即可。
+ */
+const event = (type: string, data: Record<string, unknown>, seq = 0): SessionEvent =>
+  ({ type, seq, time: 0, data: { compactionId: ID, ...data } }) as never
 
 /** 打开了压缩能力的映射上下文。 */
 const ON = { compaction: true }
@@ -153,7 +161,13 @@ describe('TC-COMPACT-02 客户端没声明就一条都不发', () => {
     h.onUpdate((u) => seen.push(u as Record<string, unknown>))
     const session = h.ctx.agents.get(String(sessionId) as never)?.session
     expect(session, '会话应当还活着').toBeDefined()
-    h.ctx.emit('session/event', session as never, event('compaction/start', { turn: null }) as never)
+    // 用会话**下一个**真实 seq：合成事件因此排在已有日志之后，投影的游标推进
+    // 与真的 append 一样。
+    h.ctx.emit(
+      'session/event',
+      session as never,
+      event('compaction/start', { turn: null }, session?.seq ?? 0) as never,
+    )
     // 通知是排到微任务里发的，`disposeBridge()` 紧跟着调会把它掐掉。
     await waitFor(
       () => seen.some((u) => String(u['sessionUpdate']).startsWith('compaction')),

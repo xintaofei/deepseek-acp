@@ -231,7 +231,7 @@ describe('TC-ASK-04 端到端：客户端没有表单能力时照样能问', () 
     expect(h.permissionRequests[0]?.toolCall.toolCallId).toBe('ask-1')
     // 落回会话日志才证明答案的**形状**被上游接受了，而不只是「按钮显示出来过」。
     const agent = h.ctx.agents.get(sessionId as never)
-    const results = JSON.stringify(agent?.session.events.filter((e) => e.type === 'tool/result') ?? [])
+    const results = JSON.stringify(agent?.session.snapshotEvents().filter((e) => e.type === 'tool/result') ?? [])
     expect(results).toContain('Redis')
     h.disposeBridge()
   }, 30_000)

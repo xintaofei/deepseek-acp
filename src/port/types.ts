@@ -8,7 +8,7 @@
  */
 
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ClientTextReader } from '../composition/session-fs.js'
 import type { McpMountSpec } from '../mcp/spec.js'
@@ -386,6 +386,15 @@ export interface EventSource {
    * @returns 取消订阅函数
    */
   onSessionEvent(sink: (agent: Agent, event: SessionEvent) => void): () => void
+  /**
+   * 订阅模型的实时流式分片。回调需自行按 agent 解复用。
+   *
+   * 与 {@link onSessionEvent} 并列而不是合并进去，是因为它**不是**会话事件：帧流
+   * 是进程内的、transient 的，日志里没有它（落库的是随 `assistant/message` 一起
+   * 写下的紧凑记录）。少了这条订阅，客户端要等一整步结束才看到第一个字。
+   * @returns 取消订阅函数
+   */
+  onAssistantStream(sink: (agent: Agent, frame: AssistantStreamFrame) => void): () => void
   /** 某条入队消息被认领为某个回合时触发，用于 prompt↔turn 相关性 */
   onInboxClaimed(sink: (agent: Agent, messageId: string, turn: number) => void): () => void
   /** 回合级模型错误 */

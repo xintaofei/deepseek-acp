@@ -12,11 +12,13 @@
 
 import { describe, expect, it } from 'vitest'
 import { createHarness } from './harness.js'
+import { readSessionLog } from './session-log.js'
 import { realTempDir } from './temp-dir.js'
 
 describe('TC-SESS-09 prompt completion persists the final turn', () => {
   it('returns only after the completed assistant turn reaches the native log', async () => {
-    const h = await createHarness({ sessionsRoot: realTempDir('dsacp-durable-') })
+    const root = realTempDir('dsacp-durable-')
+    const h = await createHarness({ sessionsRoot: root })
     try {
       const { sessionId } = await h.acp.request('session/new', {
         cwd: realTempDir('dsacp-durable-work-'), mcpServers: [],
@@ -27,10 +29,15 @@ describe('TC-SESS-09 prompt completion persists the final turn', () => {
       })
       expect(response.stopReason).toBe('end_turn')
       // Read physical storage before disposal or any polling can mask the gap.
-      const raw = await h.ctx.get('sessionPersistence')!.readRaw(sessionId as never)
+      //
+      // 直接读磁盘，不经 `ctx.sessionPersistence`：dsh 0.1.5 把 `readRaw()` 换成了
+      // 逐会话句柄（`open`/`read`），而那条路径答的是「后端认为可见」——写入缓冲
+      // 里的内容对它可见，对崩溃后的下一个进程不可见。这条用例要的恰恰是后者，
+      // 所以判据只能是字节本身。见 `./session-log.ts`。
+      const raw = readSessionLog(root)
       expect(raw, 'prompt response must not precede its persisted history').toBeDefined()
-      expect(raw?.content).toContain('durable-final-answer')
-      expect(raw?.content).toContain('"turn/end"')
+      expect(raw).toContain('durable-final-answer')
+      expect(raw).toContain('"turn/end"')
     } finally {
       await h.retire()
     }

@@ -47,10 +47,32 @@ export const FAKE_MODEL_VISION = 'fake-model-vision'
 export class FakeLlmAdapter extends LlmAdapter {
   /** 每次调用产出的文本分片；分成多片以便验证增量转发 */
   deltas: string[] = ['Hel', 'lo']
+  /**
+   * 正文之前产出的推理分片；默认不产出。
+   *
+   * 推理与正文走的是**两条不同的更新**（`agent_thought_chunk` /
+   * `agent_message_chunk`），而它们在流里紧挨着。默认关掉是因为绝大多数用例断的
+   * 是正文，凭空多出思考块会让它们全部失配。
+   */
+  reasoningDeltas: string[] = []
   /** 每片之间的延迟，用于制造可取消的窗口 */
   delayMs = 0
   /** 置位后 stream 抛错，用于验证回合失败路径 */
   failWith: Error | undefined
+  /**
+   * 置位后本次流**先照常吐出 {@link deltas}、再以一个 error finish 收尾**；
+   * 产出后清空，下一次调用正常作答。
+   *
+   * 与 {@link failWith} 的差别是这条**吐过字**：上游据此把这次尝试记成
+   * `assistant/attempt`（带着已经发出去的分片）而不是 `assistant/message`，
+   * 而「已经发出去的分片」正是实时与重放最容易分叉的那一处。抛异常那条走的是
+   * 另一个分支（没有 finish，assembler 里也没有 blocks），测不到这件事。
+   *
+   * 配一个返回 `{kind:'retry'}` 的 `agent/request-error` 监听器，就得到一次
+   * 真实的「吐了半句话再重试」——真实部署里 `dsh-llm-retry` 与
+   * `dsh-compaction-basic` 都会产生这个形状。
+   */
+  errorFinishOnce: { message: string; code: string } | undefined
   /**
    * 文本流的结束原因。
    *
@@ -246,6 +268,16 @@ export class FakeLlmAdapter extends LlmAdapter {
       return
     }
 
+    if (this.reasoningDeltas.length > 0) {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      for (const text of this.reasoningDeltas) yield { type: 'reasoning-delta', index: 0, text }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: { type: 'reasoning', text: this.reasoningDeltas.join('') },
+      }
+    }
+
     yield { type: 'block-start', index: 0, blockType: 'text' }
     if (this.duringTurn !== undefined) await this.duringTurn()
     for (const text of this.deltas) {
@@ -267,6 +299,13 @@ export class FakeLlmAdapter extends LlmAdapter {
     }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: this.deltas.join('') } }
     if (this.usage !== undefined) yield { type: 'usage', usage: this.usage }
+
+    const errorFinish = this.errorFinishOnce
+    if (errorFinish !== undefined) {
+      this.errorFinishOnce = undefined
+      yield { type: 'finish', reason: { kind: 'error', failure: errorFinish } }
+      return
+    }
     yield { type: 'finish', reason: this.finishWith }
   }
 }

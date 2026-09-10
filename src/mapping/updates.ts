@@ -8,7 +8,7 @@
  */
 
 import type { SessionUpdate } from '@agentclientprotocol/sdk'
-import type { CallId, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // 侧效应类型导入：把 `command/run`、`command/done`、`plan/mode` 合并进
 // `SessionEventMap`。纯类型，组合里没挂这两个插件时下面的分支根本收不到事件。
@@ -19,7 +19,7 @@ import { harnessBlockToAcpContent } from '../codec/content.js'
 import { modeId } from '../config/modes.js'
 import type { ToolPresenter } from '../presentation/presenter.js'
 import { NO_TERMINAL, toolCallUpdate, toolResultUpdate, type TerminalRendering } from '../presentation/tool-call.js'
-import { assistantMessageId } from '../session/fork-point.js'
+import { assistantStreamUpdates } from './assistant-stream.js'
 import { todosToPlan } from './plan.js'
 
 /** 映射一条事件所需的会话上下文。 */
@@ -33,8 +33,14 @@ export interface MappingContext {
   /**
    * 是否在重放历史（`session/load`）。
    *
-   * 只影响用户消息：实时流里客户端刚把 prompt 发过来，回显一遍是重复；重放时
-   * 不给，客户端拿到的是一串没有问题的回答。
+   * 影响两类事件，两类的理由相反：
+   *
+   *  - **用户消息与命令回显**：实时流里客户端刚把 prompt 发过来，回显一遍是
+   *    重复；重放时不给，客户端拿到的是一串没有问题的回答。
+   *  - **助手分片**：实时那份走的是进程内帧流（`agent/assistant-stream`），
+   *    日志里的紧凑流只在重放时展开——两边都发就是每句话说两遍。
+   *
+   * 归结成一句：这个开关切的是「这条更新在实时路径上是不是已经由别处发过了」。
    */
   readonly replay?: boolean
   /**
@@ -78,38 +84,47 @@ export function mapEvent(event: SessionEvent, context: MappingContext = {}): Ses
   const terminal = context.terminal ?? NO_TERMINAL
 
   switch (event.type) {
-    case 'assistant/chunk': {
-      const chunk = event.data.chunk
-      // ACP 的 `messageId` 语义是「同一条消息的所有分片共享，值变了即新消息开始」，
-      // 而上游一步（step）恰好产出一条助手消息，所以 `<turn>:<step>` 就是它。
+    case 'assistant/message': {
+      const { turn, step, stream, usage } = event.data
+      // 重放时才从日志里展开分片。实时路径下这段文本已经由
+      // `agent/assistant-stream` 那条进程内帧流逐片发过了（见
+      // `./assistant-stream.ts`），在这里再发一遍就是每句话说两次。
       //
-      // 取 `turn`/`step` 而不是那条消息自己的持久 id：id 要等 `assistant/message`
-      // 组装完才有，而分片是在那之前逐条发出去的。turn/step 在分片上就带着，因此
-      // 实时流与 `session/load` 重放给出的是同一串值——两条路径共用本函数。
-      //
-      // 推理与正文属于**同一条**消息，故共享同一个 id。
-      const messageId = assistantMessageId(event.data.turn, event.data.step)
-      // 增量转发，不缓冲成整段——这正是相对官方 automation 通道的核心差异（US-03）。
-      if (chunk.type === 'text-delta') {
-        return [{ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: chunk.text } }]
-      }
-      if (chunk.type === 'reasoning-delta') {
-        return [{ sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: chunk.text } }]
-      }
-      // block-start 等非文本增量不产出更新。
-      return []
+      // 反过来，重放时**只能**走这里：帧流不落库，日志里剩下的就是这条消息随身
+      // 带的紧凑记录。两条路径产出的更新序列相同，`session/load` 因此仍与当初
+      // 那次逐字一致——同源这件事从「同一条事件」变成了「同一条规则」。
+      const updates: SessionUpdate[] = context.replay === true ? assistantStreamUpdates(turn, step, stream) : []
+
+      // 用量记账随消息一起落库——上游没有独立的用量事件，两者同源同刻。
+      if (usage === undefined) return updates
+      const size = context.contextWindow?.()
+      // 分母不知道就不发这一条：ACP 的 `size` 是必填项，编一个默认值会画出一根
+      // 看起来权威、实际刻度错误的进度条——那比没有进度条更坏。
+      if (size === undefined || size <= 0) return updates
+      updates.push({ sessionUpdate: 'usage_update', used: contextUsed(usage), size })
+      return updates
     }
 
-    case 'assistant/message': {
-      // 文本已由 `assistant/chunk` 逐片发过了，这里只取随消息一起落库的用量
-      // 记账——上游没有独立的用量事件，两者同源同刻。
-      const usage = event.data.usage
-      if (usage === undefined) return []
-      const size = context.contextWindow?.()
-      // 分母不知道就整条不发：ACP 的 `size` 是必填项，编一个默认值会画出一根
-      // 看起来权威、实际刻度错误的进度条——那比没有进度条更坏。
-      if (size === undefined || size <= 0) return []
-      return [{ sessionUpdate: 'usage_update', used: contextUsed(usage), size }]
+    case 'assistant/attempt': {
+      // 一次**没能committed成消息**的尝试：流中途报错、被重试、或取消时一个字
+      // 都还没吐出来。上游把它单独记一条，正是为了「保住那段已经发出去的文字，
+      // 又不把它伪造成模型可见的历史」。
+      //
+      // **重放它，尽管它不在 surface 上。** 判据不是「这段话算不算对话」，而是
+      // 「客户端当时看没看见」——看见了就必须在恢复时同样看见，否则同一条会话
+      // 重开之后少掉一段，而那正是本模块开头那条硬约束（实时与重放同源）说的事。
+      // 上游给这条事件配了 `stream` 字段就是为了让消费方能做到这一点。
+      //
+      // 用与 `assistant/message` **相同**的 `<turn>:<step>`：重试走的是同一步
+      // （loop 在 `while(true)` 外面就捕获了 turn/step），实时那两次也是共用这
+      // 一个 id 发出去的。给它另编一个 id 会让重放把一段当时连在一起的文字拆成
+      // 两个气泡——那同样是「与当初不一样」。
+      //
+      // 代价照实说：一次「吐了半句话再重试」的回合，转录里会留下那半句加上重来
+      // 的完整答案。这是 0.8.0（`assistant/chunk` 逐片落库）就有的样子，不是这
+      // 次改出来的；真要收拾它得先有一个能撤回已发分片的机制，那是另一件事。
+      if (context.replay !== true) return []
+      return assistantStreamUpdates(event.data.turn, event.data.step, event.data.stream)
     }
 
     // ── 上下文压缩 ────────────────────────────────────────────────────
@@ -180,7 +195,7 @@ export function mapEvent(event: SessionEvent, context: MappingContext = {}): Ses
       if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return []
 
       const block = event.data.message.content[0]
-      const callId: CallId = block.toolCallId
+      const callId: ToolCallId = block.toolCallId
       const isError = block.isError ?? false
       const view = presenter.result(callId, block.content, isError, event.data.meta)
       return [toolResultUpdate(callId, view, isError, terminal)]

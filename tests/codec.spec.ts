@@ -7,8 +7,10 @@ import type { ContentBlock } from '@agentclientprotocol/sdk'
 import type { TurnEndReason } from '@deepseek-ai/dsh-session'
 import { acpPromptToText, promptHasUnsupportedContent } from '../src/codec/prompt.js'
 import { turnEndToStopReason } from '../src/codec/stop-reason.js'
+import { AssistantStreamRelay } from '../src/mapping/assistant-stream.js'
 import { mapEvent } from '../src/mapping/updates.js'
 import { handleInitialize } from '../src/protocol/initialize.js'
+import { messageEvent, reasoningRun, replayStream, textRun } from './assistant-stream.js'
 
 describe('turnEndToStopReason', () => {
   it('把每个已知 TurnEndReason 映射为合法 StopReason', () => {
@@ -132,19 +134,14 @@ describe('promptHasUnsupportedContent', () => {
 })
 
 describe('mapEvent', () => {
-  const chunkEvent = (chunk: unknown, turn = 1, step = 1) =>
-    ({ type: 'assistant/chunk', data: { turn, step, chunk } }) as never
-
-  it('把 text-delta 映射为 agent_message_chunk（增量，US-03）', () => {
-    const updates = mapEvent(chunkEvent({ type: 'text-delta', text: 'hi' }))
-    expect(updates).toEqual([
-      { sessionUpdate: 'agent_message_chunk', messageId: '1:1', content: { type: 'text', text: 'hi' } },
+  it('重放时把落库的紧凑流展开成 agent_message_chunk（US-03）', () => {
+    expect(replayStream([textRun('Hel', 'lo')])).toEqual([
+      { sessionUpdate: 'agent_message_chunk', messageId: '1:1', content: { type: 'text', text: 'Hello' } },
     ])
   })
 
-  it('把 reasoning-delta 映射为 agent_thought_chunk', () => {
-    const updates = mapEvent(chunkEvent({ type: 'reasoning-delta', text: 'think' }))
-    expect(updates).toEqual([
+  it('推理 run 展开成 agent_thought_chunk', () => {
+    expect(replayStream([reasoningRun('think')])).toEqual([
       { sessionUpdate: 'agent_thought_chunk', messageId: '1:1', content: { type: 'text', text: 'think' } },
     ])
   })
@@ -152,15 +149,22 @@ describe('mapEvent', () => {
   it('正文与推理共享同一个 messageId，换一步就换一个', () => {
     // ACP 对 `messageId` 的语义是「值变了即新消息开始」。推理与正文属于同一条
     // 助手消息，必须同 id；下一步（工具跑完之后那次模型调用）才是新消息。
-    const same = (chunk: unknown, turn?: number, step?: number): unknown =>
-      (mapEvent(chunkEvent(chunk, turn, step))[0] as { messageId?: string }).messageId
-    expect(same({ type: 'text-delta', text: 'a' })).toBe(same({ type: 'reasoning-delta', text: 'b' }))
-    expect(same({ type: 'text-delta', text: 'a' })).not.toBe(same({ type: 'text-delta', text: 'a' }, 1, 2))
-    expect(same({ type: 'text-delta', text: 'a' })).not.toBe(same({ type: 'text-delta', text: 'a' }, 2, 1))
+    const idOf = (record: unknown, turn?: number, step?: number): unknown =>
+      (replayStream([record], turn, step)[0] as { messageId?: string }).messageId
+    expect(idOf(textRun('a'))).toBe(idOf(reasoningRun('b')))
+    expect(idOf(textRun('a'))).not.toBe(idOf(textRun('a'), 1, 2))
+    expect(idOf(textRun('a'))).not.toBe(idOf(textRun('a'), 2, 1))
   })
 
-  it('非文本增量（如 block-start）不产出更新', () => {
-    expect(mapEvent(chunkEvent({ type: 'block-start' }))).toEqual([])
+  it('非文本片（如 block-start）不产出更新', () => {
+    expect(replayStream([{ type: 'chunk', time: 0, chunk: { type: 'block-start', index: 0, blockType: 'text' } }]))
+      .toEqual([])
+  })
+
+  it('**不重放**时一条分片都不发 —— 实时路径的文本走帧流，不走这里', () => {
+    // 这一条钉着 0.1.5 之后最容易出的那个错：日志里的紧凑流与进程内的帧流是
+    // 同一段文字的两种载体，两边都发就是每句话说两遍。
+    expect(mapEvent(messageEvent([textRun('Hello')]))).toEqual([])
   })
 
   it('未知事件类型静默忽略而非抛错', () => {
@@ -170,7 +174,57 @@ describe('mapEvent', () => {
   })
 
   it('是事件的纯函数：同一输入恒产出相等输出（TC-PROP-03 基础）', () => {
-    const event = chunkEvent({ type: 'text-delta', text: 'same' })
-    expect(mapEvent(event)).toEqual(mapEvent(event))
+    const event = messageEvent([textRun('same')])
+    expect(mapEvent(event, { replay: true })).toEqual(mapEvent(event, { replay: true }))
+  })
+})
+
+describe('AssistantStreamRelay —— 实时帧流', () => {
+  // `revision` 在真实帧上是**逐帧自增**的发布序号，不是「第几次尝试」。夹具照着
+  // 这个事实造帧：写成常量的话，一个错误地把它拼进键的实现照样能通过。
+  let revision = 0
+  const start = (turn: number, step: number, attemptId = 'a-1') =>
+    ({ type: 'start', attemptId, revision: ++revision, turn, step }) as never
+  const chunk = (chunk: unknown, attemptId = 'a-1') =>
+    ({ type: 'chunk', attemptId, revision: ++revision, index: 0, time: 0, chunk }) as never
+  const end = (attemptId = 'a-1') =>
+    ({ type: 'end', attemptId, revision: ++revision, index: 1, outcome: { kind: 'abandoned' } }) as never
+
+  it('分片带上 start 帧那次尝试的 turn/step —— 与重放给出同一个 messageId', () => {
+    const relay = new AssistantStreamRelay()
+    expect(relay.frame(start(2, 3))).toEqual([])
+    expect(relay.frame(chunk({ type: 'text-delta', index: 0, text: 'hi' }))).toEqual([
+      { sessionUpdate: 'agent_message_chunk', messageId: '2:3', content: { type: 'text', text: 'hi' } },
+    ])
+  })
+
+  it('没见过 start 的尝试一片都不发 —— 编一个 messageId 会把它拆成另一个气泡', () => {
+    const relay = new AssistantStreamRelay()
+    expect(relay.frame(chunk({ type: 'text-delta', index: 0, text: 'hi' }))).toEqual([])
+  })
+
+  it('end 之后同一个 attemptId 不再复用旧的 turn/step', () => {
+    const relay = new AssistantStreamRelay()
+    relay.frame(start(1, 1))
+    relay.frame(end())
+    expect(relay.frame(chunk({ type: 'text-delta', index: 0, text: 'late' }))).toEqual([])
+  })
+
+  it('同一次尝试被重发 start 时按新的那次算', () => {
+    const relay = new AssistantStreamRelay()
+    relay.frame(start(1, 1))
+    relay.frame(start(4, 2))
+    expect(relay.frame(chunk({ type: 'text-delta', index: 0, text: 'x' }))).toEqual([
+      { sessionUpdate: 'agent_message_chunk', messageId: '4:2', content: { type: 'text', text: 'x' } },
+    ])
+  })
+
+  it('两次并存的尝试互不串台', () => {
+    const relay = new AssistantStreamRelay()
+    relay.frame(start(1, 1, 'a-1'))
+    relay.frame(start(9, 9, 'a-2'))
+    expect(relay.frame(chunk({ type: 'text-delta', index: 0, text: 'x' }, 'a-1'))).toEqual([
+      { sessionUpdate: 'agent_message_chunk', messageId: '1:1', content: { type: 'text', text: 'x' } },
+    ])
   })
 })

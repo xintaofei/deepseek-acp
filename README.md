@@ -105,9 +105,9 @@ original interleaved order, so `before [image] after [image]` does not become
 `before after [image] [image]`. Image bytes are stored in a content-addressed store under
 `$DSH_HOME/attachments/`, while session logs contain references only. Writing base64 directly into
 the log could make a single entry tens of megabytes, and every restore would have to read the whole
-file. The default model, `deepseek-v4-flash`, **does not accept images**. Image messages are rejected
-with a prompt to switch to `deepseek-v4-flash-vision-exp` in the model selector. PNG, JPEG, WebP, and
-GIF are supported, with up to 20 images per message.
+file. The default model, `deepseek-flash`, accepts images. On a text-only route the message is
+rejected with a prompt naming the current model, so you know to switch in the model selector. PNG,
+JPEG, WebP, and GIF are supported, with up to 20 images per message.
 
 **Code navigation (`lsp`).** Language servers are connected automatically when installed; if none
 are found, the entire tool is omitted. At startup, the agent scans `PATH` once for built-in

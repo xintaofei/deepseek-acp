@@ -10,6 +10,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Bridge } from '../bridge.js'
 import { invalidParams, internalError } from '../codec/errors.js'
 import { modeStateFor } from '../config/modes.js'
+import { AssistantStreamRelay } from '../mapping/assistant-stream.js'
 import { ToolPresenter } from '../presentation/presenter.js'
 import { mountSpecs } from './mcp-params.js'
 import { commandsUpdate } from './session-commands.js'
@@ -69,7 +70,8 @@ export async function handleNewSession(
   // 呈现器带上 agent 的 scope：工具是按作用域注册的，用全局视图去解析会漏掉
   // 只在该 agent 内可见的工具（约束 C2 的同源陷阱——错的 scope 不报错，只返回空）。
   const presenter = new ToolPresenter(bridge.port.tools, bridge.warn, handle.agent)
-  const record = { acpSessionId: sessionId, seq, handle, cwd: params.cwd, presenter, inflight: undefined }
+  const stream = new AssistantStreamRelay()
+  const record = { acpSessionId: sessionId, seq, handle, cwd: params.cwd, presenter, stream, inflight: undefined }
   bridge.table.add(record)
 
   // 命令目录只能经 `available_commands_update` 给出（应答里没有这个字段），

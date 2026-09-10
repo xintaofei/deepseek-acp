@@ -15,6 +15,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmService from '@deepseek-ai/dsh-llm'
 import SessionService from '@deepseek-ai/dsh-session'
+import SessionProjections from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry, { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
@@ -22,7 +23,17 @@ import { waitFor } from './harness.js'
 
 async function bootDsh(): Promise<Context> {
   const ctx = new Context()
-  for (const p of [SystemPrompt, SessionService, LlmService, ToolRegistry, AgentRegistry, AgentLoop]) {
+  // `SessionProjections` 是 `AgentLoop` 的注入项（回合边界投影归它注册）：缺席时
+  // loop 不启动、也不报错，直到第一次建 agent 才以「no agent factory registered」失败。
+  for (const p of [
+    SystemPrompt,
+    SessionService,
+    LlmService,
+    ToolRegistry,
+    SessionProjections,
+    AgentRegistry,
+    AgentLoop,
+  ]) {
     await ctx.plugin(p, {})
   }
   await waitFor(() => ctx.agents !== undefined && ctx.tools !== undefined, 5_000, 'dsh services')

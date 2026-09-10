@@ -34,7 +34,7 @@ async function askThroughModel(h: TestHarness, questions: unknown): Promise<stri
 /** 某会话已记录的工具结果，序列化后便于整体查找。 */
 function toolResults(h: TestHarness, sessionId: string): string {
   const agent = h.ctx.agents.get(sessionId as never)
-  return JSON.stringify(agent?.session.events.filter((e) => e.type === 'tool/result') ?? [])
+  return JSON.stringify(agent?.session.snapshotEvents().filter((e) => e.type === 'tool/result') ?? [])
 }
 
 describe('TC-ELI-01 问题 → 表单', () => {

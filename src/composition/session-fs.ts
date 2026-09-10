@@ -189,6 +189,19 @@ export class DelegatedReadFileSystem extends FileSystem {
     return this.baseFs.readBytes(target, signal, maxBytes)
   }
 
+  /**
+   * 同样**不**改道，理由与 {@link readBytes} 同源且更强：这条读的是一个字节窗口
+   * （`[offset, offset+length)`），而 ACP 的 `fs/read_text_file` 只有行号窗口。
+   * 拿编辑器那份文本去切字节，多字节字符会被切在半个码位上。
+   */
+  readByteRange(
+    target: FsTarget,
+    range: { offset: number; length: number },
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    return this.baseFs.readByteRange(target, range, signal)
+  }
+
   listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]> {
     return this.baseFs.listDir(target, signal)
   }
