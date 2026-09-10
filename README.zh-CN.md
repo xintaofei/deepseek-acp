@@ -191,7 +191,7 @@ Key 填在同一页的 **DeepSeek Harness 配置** 面板：
 
 旧版 codeg 没有这个内置条目，仍可走 设置 → 智能体 → **添加自定义智能体** →
 **手动填写**：注册表 ID `deepseek-acp`、分发信息
-`{"npx": {"package": "deepseek-acp@0.8.0", "cmd": "deepseek-acp"}}`、环境变量
+`{"npx": {"package": "deepseek-acp@0.9.0", "cmd": "deepseek-acp"}}`、环境变量
 `DEEPSEEK_API_KEY=sk-...`，版本查询命令留空。「版本」一栏要与分发信息里的版本一致
 ——codeg 的 preflight 会对账，对不上的表现是连接阶段失败而不是报错。
 

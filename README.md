@@ -222,7 +222,7 @@ session-level selectors available from the input box.
 
 Older codeg versions without the built-in entry can still use **Settings > Agents > Add Custom
 Agent > Manual Configuration**. Set the registry ID to `deepseek-acp`, the distribution information
-to `{"npx": {"package": "deepseek-acp@0.8.0", "cmd": "deepseek-acp"}}`, and the environment
+to `{"npx": {"package": "deepseek-acp@0.9.0", "cmd": "deepseek-acp"}}`, and the environment
 variable to `DEEPSEEK_API_KEY=sk-...`; leave the version-query command empty. The **Version** field
 must match the version in the distribution information. codeg checks them during preflight, and a
 mismatch appears as a connection failure rather than a validation error.

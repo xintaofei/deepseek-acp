@@ -1,6 +1,6 @@
 {
   "name": "deepseek-acp",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Editor-facing Agent Client Protocol adapter for DeepSeek Harness",
   "license": "MIT",
   "author": "xintaofei",

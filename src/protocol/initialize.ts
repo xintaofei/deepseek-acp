@@ -21,7 +21,7 @@ import {
  * `tests/session.spec.ts` 的一条用例守着——codeg 注册自定义 agent 时按
  * `deepseek-acp@<版本>` 对账，两处一旦漂移，表现是编辑器里连不上而不是报错。
  */
-export const AGENT_INFO = { name: 'deepseek-acp', version: '0.8.0' } as const
+export const AGENT_INFO = { name: 'deepseek-acp', version: '0.9.0' } as const
 
 /**
  * 唯一的鉴权方式：**Terminal Auth**（`deepseek-acp --setup`）。
