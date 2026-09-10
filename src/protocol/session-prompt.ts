@@ -91,6 +91,10 @@ async function runCommand(
     if (record.inflight !== inflight) return
     record.inflight = undefined
     const detail = error instanceof Error ? error.message : String(error)
+    // 也记一行：这条错误唯一的去处是客户端，而它可能只显示「命令失败」甚至
+    // 直接吞掉。落盘失败是部署侧的事故（盘满、根目录不可写），运维要在
+    // stderr 里看得见它。
+    bridge.warn(`command completion failed: ${detail}`)
     fail(internalError(`command completion failed: ${detail}`))
   })
   return { stopReason: await settled }
@@ -229,6 +233,9 @@ export async function handlePrompt(bridge: Bridge, params: PromptRequest): Promi
       if (record.inflight !== inflight) return
       record.inflight = undefined
       const detail = error instanceof Error ? error.message : String(error)
+      // 同 runCommand：错误只发给客户端的话，一次持久化事故在 agent 这侧不留
+      // 任何痕迹。
+      bridge.warn(`prompt completion failed: ${detail}`)
       inflight.reject(internalError(`prompt completion failed: ${detail}`))
     })
   })

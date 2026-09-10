@@ -146,7 +146,7 @@ git push --follow-tags
 - **本包无 default export**。Cordis loader 的 unwrapping 会吞掉具名 `inject` 元数据。
 - **`ScopeKey` 是 `handle.agent`**，不是 `agents.create()` 返回的句柄。传错不报错，只静默返回空集。
 - **依赖锁定同一精确版本**。上游各包的 `latest` dist-tag 指向不同版本线，用 `latest` 会因 peer 冲突装不上。有契约测试守护。
-- **prompt 结算等 whole-agent idle**，不是 `turn/end`。steering 与注入工作可能在 idle 前继续贡献消息。
+- **prompt 结算等 whole-agent idle，再等一次落盘**，不是 `turn/end`。steering 与注入工作可能在 idle 前继续贡献消息，所以不能看 `turn/end`；而 idle 也不排空写入缓冲，所以之后还要 `ctx.sessions.flush()`。落盘失败时这次 prompt 以错误应答——报 `end_turn` 而历史没保住，是这条链上最坏的结果。
 - **GUI 客户端不继承 shell 环境**。`.zshrc` 里的 `export DEEPSEEK_API_KEY` 到不了子进程，凭据要落在 `~/.dsh/.credentials.yaml`。
 - **上游各包的 `latest` 指向不同版本线**。`dsh-llm-deepseek@latest` 是 `0.0.1-rc.1`，本项目要的 `0.1.0-rc.6` 得显式写出来。
 - **卡片类型由工具自己声明**（`presentCall` / `presentResult`），bridge 绝不按工具名嗅探。
@@ -155,7 +155,7 @@ git push --follow-tags
 - **终端输出的 `_meta` 载荷键是 `data`，不是 `output`**。写错不报错：客户端照样按 `terminal_info` 建出终端，然后永远收不到内容。纯函数用例照着实现写会一起错，是端到端用例抓到的。
 - **`dsh-subprocess` 只是 seam**。要挂的是 `dsh-subprocess-local`（它继承前者并注册同一个服务）。两个都挂 → 「服务已注册」；只挂 seam → 装配成功，第一条命令才炸 `spawn is not a function`。
 - **`session-query` 是抽象类，没有独立实现**。`session/list` 只需元数据，直接走 `ctx.sessionPersistence.list()`，不必为此拉进 sqlite 全文检索。
-- **会话落盘是批量合并的**（默认 200ms 窗口）。回合结束、乃至 agent 离开注册表，都不等于日志已在磁盘上。
+- **会话落盘是批量合并的**（默认 200ms 窗口）。回合结束、乃至 agent 离开注册表，都不等于日志已在磁盘上。这条真的咬过一次：客户端拿到 `session/prompt` 的应答立刻退出，最后一轮的 `assistant/message` 与 `turn/end` 还在缓冲里，重开会话只剩用户那半句话，**且没有任何错误**——看起来像模型忘了自己说过什么。修法是结算前显式 flush（见上面 prompt 结算那条），TC-SESS-09 守着它，判据是应答之后**立刻**读物理存储：中间加任何等待都会把这个竞态掩盖掉。
 - **重放要过滤注入的上下文**。`dsh-agent-instructions` 把整份 AGENTS.md / CLAUDE.md 包成一条 `kind: 'plugin'` 的用户消息塞进回合；不按 `source.kind === 'user'` 过滤，用户会在自己的对话记录里读到一段从没打过的话。
 - **ACP 没有「支持配置项」的能力位**。声明方式就是在 `session/new` / `session/load` 的应答里带回 `configOptions`；空数组等价于没有可配置项。
 - **沙箱模式的覆盖写在会话日志里**，不是内存。因此它随 `session/load` 一起恢复——恢复一个当初放宽过权限的会话，控件如实显示放宽后的状态，而不是显示部署默认让人以为是安全的。

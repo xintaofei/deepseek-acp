@@ -403,7 +403,15 @@ export interface AgentDriver {
    */
   prepare(parts: readonly PromptPart[]): { readonly messageId: string; readonly submit: (agent: Agent) => void }
   cancel(agent: Agent): void
-  /** 整体静默并确认已挂载的持久化完成；保存失败时拒绝，不能报告成功。 */
+  /**
+   * 整体静默（**非单个回合结束**）并确认已挂载的持久化落定 —— prompt 的正确结算点。
+   *
+   * 两个条件都不能少：只等 turn/end 会提前结算（steering 与注入工作可能在 idle
+   * 之前继续贡献消息，详设 §6.2）；只等 idle 则会在日志还在写入缓冲里时就报成功
+   * （落盘是批量合并的），客户端拿到应答立刻退出就会丢掉这一轮。
+   *
+   * 保存失败时**拒绝**，不能报告成功。
+   */
   whenIdle(agent: Agent): Promise<void>
 }
 
