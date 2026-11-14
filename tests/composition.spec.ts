@@ -141,6 +141,14 @@ describe('TC-COMP-04 M1-c 的服务都在', () => {
     expect(ctx.sessions.messageProjections.map((p) => p.type)).toContain('image/offload')
   }, 30_000)
 
+  it('模型请求的重试已挂上 —— 否则网络一抖这一轮就直接失败（0.9.0 起一直如此）', async () => {
+    const { ctx, agent } = await scoped()
+    // `llmRetry` 是 `dsh-llm-retry` 在启动时注册的投影单元（记每一步重试了几次）。
+    // 读得到初始状态就说明插件真的起来了；没挂、或挂了但卡在等注入，这里都是 undefined。
+    // 这个读法上游标了弃用，会打一行告警，用例里无妨。
+    expect(ctx.sessionProjections.stateOf(agent.session, 'llmRetry')).toEqual({})
+  }, 30_000)
+
   it('plan 引导段告诉模型方案要以 # 标题开头 —— 上游会照这条硬校验', () => {
     // `exit_plan_mode` 用 `/^#\s+\S/` 校验方案文本，不满足直接拒绝这次退出。
     // 提示里不写，模型只能撞几次墙才知道；这两处是同一条规则的两半。

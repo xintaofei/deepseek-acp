@@ -18,6 +18,7 @@ import * as CompactCommand from '@deepseek-ai/dsh-command-compact'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import BasicCompaction from '@deepseek-ai/dsh-compaction-basic'
 import * as ImageOffload from '@deepseek-ai/dsh-compaction-image-offload'
+import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -429,6 +430,18 @@ export async function composeAgent(
   // 共用会话根的上游桌面端写的），不挂它这条会话就恢复不出来。所以不跟着
   // 「部署收不收图」走，一律挂。无配置。
   await ctx.plugin(ImageOffload)
+  // 模型请求失败后的**重试**。适配器只负责把失败分类、给出策略，真正去重试的是
+  // 这个插件；不挂它，网络一抖（连接错误、超时、限流、5xx）这一轮就直接失败，
+  // 0.9.0 起一直如此。它与上面那个挂在同一个「请求出错」钩子上，各管各的错误码，
+  // 不认识的交给下一个，所以两者共存。
+  //
+  // 策略归各 provider 的 `retryPolicy`，这里不配，吃上游默认：只重试 `TRANSPORT`、
+  // `TIMEOUT`、`RATE_LIMIT`、`SERVER`、`EMPTY_RESPONSE`，最多 5 次，500 ms 起指数
+  // 退避、单次至多 10 s，服务端给的 `Retry-After` 在这个上限内就照它等。认证失败、
+  // 余额不足、请求本身有错都不重试——每次重试都是一次计费请求，必然再失败的不该再发。
+  // 每次重试先在日志里记一条 `llm/retry`，客户端据此看到一行重试提示
+  // （`mapping/updates.ts`），而不是对着一个不动的回答干等。
+  await ctx.plugin(LlmRetry)
 
   // ── 语言服务器（模型面 `lsp` 工具）──────────────────────────────────
   // 一台机器上一个语言服务器都找不到时整套不挂：`tool-lsp` 会往**每一次**请求的

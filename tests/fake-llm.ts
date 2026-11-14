@@ -8,11 +8,31 @@
 
 import {
   LlmAdapter,
+  resolveRetryPolicy,
   type FinishReason,
   type GenerateOptions,
+  type LlmFailure,
+  type ResolvedRetryPolicy,
+  type RetryPolicyConfig,
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+
+/**
+ * 解析一份给假适配器用的重试策略。
+ *
+ * 真实默认值是 500 ms 起步、单次至多 10 s——用例里等不起，也不该靠真等去测。
+ * 退避、抖动这些**数值**归上游测，这里要的只是「重试了几次、最后怎样」，所以
+ * 默认压到 1 ms、关掉抖动，让等待既短又确定。
+ * @param config - 策略；缺省为普通模式、3 次、1 ms
+ * @returns 已解析、可直接交给 LLM 运行时的策略
+ */
+export function fakeRetryPolicy(config?: RetryPolicyConfig): ResolvedRetryPolicy {
+  return resolveRetryPolicy(
+    config ?? { mode: 'normal', maxRetries: 3, backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 } },
+    'fake retryPolicy',
+  )
+}
 
 export const FAKE_PROVIDER = 'fake'
 export const FAKE_MODEL = 'fake-model'
@@ -61,6 +81,20 @@ export class FakeLlmAdapter extends LlmAdapter {
   failWith: Error | undefined
   /** 与 {@link failWith} 相同，但只抛一次；用于验证「失败 → 恢复 → 重试」。 */
   failOnce: Error | undefined
+  /**
+   * 接下来几次调用**一个字都不吐**、直接以这些失败收尾，每次用掉一个，用完恢复
+   * 正常作答。
+   *
+   * 模拟的是连接层面的失败（连不上、5xx、限流）：真实适配器在那种情况下拿不到任何
+   * 分片。与 {@link failWith} 抛异常不同，这里走的是 error finish，失败带着**稳定
+   * 的错误码**——重试策略按码判断要不要重试，抛出来的裸异常会被归成 `UNKNOWN`。
+   */
+  failNext: LlmFailure[] = []
+  /**
+   * 这个适配器路由报给 LLM 运行时的重试策略。只在组合里挂了 `dsh-llm-retry` 时有
+   * 意义；默认是 {@link fakeRetryPolicy} 那份又短又确定的。
+   */
+  retryPolicy: ResolvedRetryPolicy = fakeRetryPolicy()
   /**
    * 置位后本次流**先照常吐出 {@link deltas}、再以一个 error finish 收尾**；
    * 产出后清空，下一次调用正常作答。
@@ -115,6 +149,14 @@ export class FakeLlmAdapter extends LlmAdapter {
 
   override providerInfo(provider: string) {
     return { id: provider, name: 'Fake' }
+  }
+
+  /**
+   * 运行时在**注册时**读一次并缓存，所以想换策略的用例要在建 harness 之前定好，
+   * 或者在注册前改这个字段——注册之后再改不会生效。
+   */
+  override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {
+    return this.retryPolicy
   }
 
   /** 每次 stream 调用实际收到的模型，按顺序；用于验证切换真的改了路由。 */
@@ -257,6 +299,11 @@ export class FakeLlmAdapter extends LlmAdapter {
     if (once !== undefined) {
       this.failOnce = undefined
       throw once
+    }
+    const failure = this.failNext.shift()
+    if (failure !== undefined) {
+      yield { type: 'finish', reason: { kind: 'error', failure } }
+      return
     }
 
     const pendingCall = this.toolCall

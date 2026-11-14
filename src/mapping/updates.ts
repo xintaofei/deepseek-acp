@@ -15,12 +15,16 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-plan-mode'
 import type {} from '@deepseek-ai/dsh-session-title'
+// 同为侧效应类型导入：把 `llm/retry` 合并进 `SessionEventMap`。
+import type {} from '@deepseek-ai/dsh-llm-retry'
 import { harnessBlockToAcpContent } from '../codec/content.js'
 import { modeId } from '../config/modes.js'
 import type { ToolPresenter } from '../presentation/presenter.js'
 import { NO_TERMINAL, toolCallUpdate, toolResultUpdate, type TerminalRendering } from '../presentation/tool-call.js'
+import { assistantMessageId } from '../session/fork-point.js'
 import { assistantStreamUpdates } from './assistant-stream.js'
 import { todosToPlan } from './plan.js'
+import { retryNoticeText } from './retry-notice.js'
 
 /** 映射一条事件所需的会话上下文。 */
 export interface MappingContext {
@@ -125,6 +129,22 @@ export function mapEvent(event: SessionEvent, context: MappingContext = {}): Ses
       // 次改出来的；真要收拾它得先有一个能撤回已发分片的机制，那是另一件事。
       if (context.replay !== true) return []
       return assistantStreamUpdates(event.data.turn, event.data.step, event.data.stream)
+    }
+
+    case 'llm/retry': {
+      // 实时与重放共用：用户当时看见了这行提示，恢复出来的转录里就得同样有它，
+      // 而且排在废弃那次的半句（上面的 `assistant/attempt`）与重来的回答之间——
+      // 日志里的顺序正是这样。理由见 `./retry-notice.ts`。
+      //
+      // 等待结束时那条 `llm/retry-started` 不出更新：重来的回答自己就会流过来。
+      const { turn, step } = event.data
+      return [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: assistantMessageId(turn, step),
+          content: { type: 'text', text: retryNoticeText(event.data) },
+        },
+      ]
     }
 
     // ── 上下文压缩 ────────────────────────────────────────────────────

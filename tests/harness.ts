@@ -27,6 +27,8 @@ import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import LlmService from '@deepseek-ai/dsh-llm'
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
 import * as ImageOffload from '@deepseek-ai/dsh-compaction-image-offload'
+import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
+import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
@@ -60,7 +62,7 @@ import { SessionListIndex } from '../src/session/list-index.js'
 import { ensurePiAi } from '../src/composition/pi-ai.js'
 import { mountNativeShell, type NativeShellToolName } from '../src/composition/shell.js'
 import * as bridge from '../src/index.js'
-import { FAKE_MODEL, FAKE_PROVIDER, FAKE_PROVIDER_ALT, FakeLlmAdapter } from './fake-llm.js'
+import { FAKE_MODEL, FAKE_PROVIDER, FAKE_PROVIDER_ALT, FakeLlmAdapter, fakeRetryPolicy } from './fake-llm.js'
 
 /** 客户端侧收到的更新，按到达顺序。 */
 export interface CapturedUpdate {
@@ -319,6 +321,17 @@ export async function createHarness(
      * 一堆再也没人认领的文件。
      */
     attachments?: string
+    /**
+     * 挂 `dsh-llm-retry`（部署里一律挂着）。缺省不挂：大多数用例里的失败就该
+     * 让这一轮立刻结束，挂上之后可重试的错误码会先重试几次，那些用例断的东西就变了。
+     */
+    retry?: boolean
+    /**
+     * 假适配器报给运行时的重试策略。运行时在**注册适配器时**读一次，所以只能在
+     * 这里给，建好 harness 之后再改 `h.llm.retryPolicy` 不生效。缺省见
+     * `fakeRetryPolicy`（3 次、1 ms）。
+     */
+    retryPolicy?: RetryPolicyConfig
   } = {},
 ): Promise<TestHarness> {
   const ctx = new Context()
@@ -463,9 +476,13 @@ export async function createHarness(
     // 与生产一致：收图的组合必须带上超预算恢复，见 boot.ts。
     await ctx.plugin(ImageOffload)
   }
+  // 与图片卸载挂在同一个「请求出错」钩子上；两者都挂时谁先谁后不该影响结果，
+  // 这里照 boot.ts 的顺序挂在它后面。
+  if (options.retry === true) await ctx.plugin(LlmRetry)
 
   // 只伪造模型这一层；回合生命周期走真实 agent loop。
   const llm = new FakeLlmAdapter()
+  if (options.retryPolicy !== undefined) llm.retryPolicy = fakeRetryPolicy(options.retryPolicy)
   ctx.llm.registerAdapter([FAKE_PROVIDER], llm)
   // 第二条路由用**另一个适配器实例**而不是把同一个注册两次：这样
   // `llmAlt.providersUsed` 非空本身就证明请求进了另一家，不必再去分辨同一份

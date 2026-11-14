@@ -106,6 +106,13 @@ humans.
 | Permission prompts | One-time allow / reject | Same, plus elevation for sandbox boundary crossings |
 | Multiple sessions | Yes | Yes |
 
+**Request retries.** Model requests that fail with a network error, a timeout, rate limiting (429),
+or a server 5xx are retried automatically, up to 5 times, with exponential backoff starting at
+0.5 s and capped at 10 s per wait; a server `Retry-After` is honored, and one longer than the cap ends the retries. While waiting,
+the reply shows a line such as "模型请求失败：…，N 秒后第 k/5 次重试", and cancellation takes
+effect immediately. Authentication failures, exhausted balance, and invalid requests are not
+retried: every retry is a billed request, and these would fail again.
+
 **Sandboxing.** Commands and file operations share the same boundary. The default mode is
 `workspace-write`, with writable roots set to `{session cwd, system temporary directory}`. Shell
 and file tools use the same policy definition. Boundary crossings are rejected, and the model can

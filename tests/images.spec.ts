@@ -229,8 +229,15 @@ describe('TC-IMG-03 拒绝路径', () => {
 describe('TC-IMG-04 图片超预算时卸载最旧的图再重试', () => {
   // DSH 0.2 起适配器不再自己丢图，而是以 `IMAGE_OFFLOAD_REQUIRED` 失败；接住它的
   // 只有 `dsh-compaction-image-offload`。漏挂时这一轮直接失败，此后每一轮都一样。
-  it('回合照常结束，重试的那次请求里最旧的图已换成占位', async () => {
-    const h = await createHarness({ attachments: realTempDir('dsacp-att-') })
+  //
+  // 两种组合各跑一遍：部署里同一个「请求出错」钩子上还挂着 `dsh-llm-retry`，它对
+  // 不在可重试集合里的码必须交给下一个处理者。要是它把这次吞了或者当成普通重试，
+  // 图多的会话会失败，或者重试时最旧的图并没有被换掉。
+  it.each([
+    { label: '只有图片卸载', retry: false },
+    { label: '同时挂着重试插件（与部署一致）', retry: true },
+  ])('回合照常结束，重试的那次请求里最旧的图已换成占位 —— $label', async ({ retry }) => {
+    const h = await createHarness({ attachments: realTempDir('dsacp-att-'), retry })
     const sessionId = await visionSession(h)
     await h.acp.request('session/prompt', {
       sessionId: sessionId as never,

@@ -81,6 +81,7 @@
     "@deepseek-ai/dsh-llm-deepseek": "0.2.2-rc.3",
     "@deepseek-ai/dsh-llm-deepseek-api-key": "0.2.2-rc.3",
     "@deepseek-ai/dsh-llm-pi-ai": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm-retry": "0.2.2-rc.3",
     "@deepseek-ai/dsh-lsp": "0.2.2-rc.3",
     "@deepseek-ai/dsh-lsp-stdio": "0.2.2-rc.3",
     "@deepseek-ai/dsh-mcp-client": "0.2.2-rc.3",
