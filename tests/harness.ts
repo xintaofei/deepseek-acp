@@ -26,6 +26,7 @@ import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import LlmService from '@deepseek-ai/dsh-llm'
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
+import * as ImageOffload from '@deepseek-ai/dsh-compaction-image-offload'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
@@ -54,6 +55,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk'
 import { AcpSettings } from '../src/composition/settings.js'
+import { SessionListIndex } from '../src/session/list-index.js'
 import { ensurePiAi } from '../src/composition/pi-ai.js'
 import { mountNativeShell, type NativeShellToolName } from '../src/composition/shell.js'
 import * as bridge from '../src/index.js'
@@ -267,6 +269,11 @@ export async function createHarness(
     /** Explicit PowerShell executable for Windows executor compatibility tests. */
     pwshPath?: string
     sessionsRoot?: string
+    /**
+     * 挂 `session/list` 的标题索引，文件落在这里。缺省不挂：大多数用例要的是
+     * 「每次都从日志折出来」那条最直接的路径。
+     */
+    listIndex?: string
     commands?: boolean
     planMode?: boolean
     questions?: boolean
@@ -290,8 +297,8 @@ export async function createHarness(
      */
     altProvider?: boolean
     /**
-     * 挂设置服务与本地凭据，两者都**关进这个目录**（`<它>/settings.yaml`、
-     * `<它>/.credentials.yaml`）。
+     * 挂设置服务与本地凭据，两者都**关进这个目录**（`<它>/deepseek-acp/settings.yaml`、
+     * `<它>/.credentials.yaml`；旧文档 `<它>/settings.yaml[.imported]` 只读）。
      *
      * 给路径而不是布尔，与 `skills` 同样的理由，而且更硬：这条链会**写盘**，
      * 一个忘了隔离的用例会去改本机真正的 `~/.dsh/.credentials.yaml`。
@@ -354,6 +361,7 @@ export async function createHarness(
   if (options.sessionsRoot !== undefined) {
     // `compression: 'none'` —— 用例出问题时日志能直接 cat 出来看。
     await ctx.plugin(JsonlPersistence, { root: options.sessionsRoot, compression: 'none' })
+    if (options.listIndex !== undefined) await ctx.plugin(SessionListIndex, { path: options.listIndex })
   }
   // 命令面与模式面分别可选：默认两个都不挂，于是「没挂时的降级行为」才是
   // 大多数用例跑的那条路径，不必专门去构造。
@@ -432,8 +440,11 @@ export async function createHarness(
   // 都指向用例给的隔离目录：这条链真的写盘。
   if (options.settings !== undefined) {
     await ctx.plugin(Loader, { baseUrl: import.meta.url })
+    // 与生产同一种布局，只是 home 换成用例目录。旧文档路径**必须**一并给出：
+    // 缺省会退回真实的 `$DSH_HOME`，用例就读到了开发者本机的配置。
     await ctx.plugin(AcpSettings, {
-      path: join(options.settings, 'settings.yaml'),
+      path: join(options.settings, 'deepseek-acp', 'settings.yaml'),
+      legacy: [join(options.settings, 'settings.yaml'), join(options.settings, 'settings.yaml.imported')],
     })
     await ctx.plugin(LocalCredentials, { dshHome: options.settings, watch: false })
     // 走与生产同一条幂等入口：`providers/*` 也会调它，两处各挂一次会以
@@ -445,6 +456,8 @@ export async function createHarness(
     // `dshHome` 显式给出：`attachment-local` 缺省会走 `$DSH_HOME` 再退到
     // `~/.dsh`，而用例绝不能写进那里。
     await ctx.plugin(LocalAttachments, { dshHome: options.attachments })
+    // 与生产一致：收图的组合必须带上超预算恢复，见 boot.ts。
+    await ctx.plugin(ImageOffload)
   }
 
   // 只伪造模型这一层；回合生命周期走真实 agent loop。

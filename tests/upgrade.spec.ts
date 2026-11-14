@@ -1,6 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { describe, expect, it } from 'vitest'
+import { AcpSettings } from '../src/composition/settings.js'
 import * as ApiKeyProvider from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import { createHarness } from './harness.js'
 import { ensurePiAi } from '../src/composition/pi-ai.js'
@@ -45,9 +48,9 @@ describe('TC-UPGRADE-01 DSH 0.2 persistence and provider configuration', () => {
       await h.acp.request('providers/set', {
         providerId: 'openai', apiType: 'openai-completions', baseUrl: 'https://fixture.invalid/v1',
       } as never)
-      const before = readFileSync(join(home, 'settings.yaml'), 'utf8')
+      const before = readFileSync(join(home, 'deepseek-acp', 'settings.yaml'), 'utf8')
       await expect(h.ctx.acpSettings.update('llm-pi-ai', { providers: { openai: { api: 'invalid-protocol' } } })).rejects.toThrow()
-      expect(readFileSync(join(home, 'settings.yaml'), 'utf8')).toBe(before)
+      expect(readFileSync(join(home, 'deepseek-acp', 'settings.yaml'), 'utf8')).toBe(before)
       expect(h.ctx.llm.listProviders().map(route => route.id)).toContain('openai')
     } finally { await h.retire() }
   })
@@ -111,5 +114,92 @@ describe('TC-UPGRADE-01 DSH 0.2 persistence and provider configuration', () => {
       expect(JSON.parse(current.split('\n')[0]!).version).toBe(4)
       expect(current).toContain('MIGRATED_REPLY')
     } finally { await h.retire() }
+  })
+})
+
+describe('TC-UPGRADE-02 provider 设置文档不与上游争 $DSH_HOME/settings.yaml', () => {
+  // 上游 0.2.x 的 CLI / 桌面端启动时会把 `$DSH_HOME/settings.yaml` 改名成
+  // `settings.yaml.imported` 并导进自己的 profile。我们写在那里的路由会被它挪走。
+  const LEGACY = stringifyPiAi({ openai: { api: 'openai-completions', baseURL: 'https://legacy.invalid/v1' } })
+
+  function stringifyPiAi(providers: Record<string, unknown>): string {
+    return `llm-pi-ai:\n  providers:\n${Object.entries(providers)
+      .map(([id, p]) => `    ${id}:\n${Object.entries(p as Record<string, string>).map(([k, v]) => `      ${k}: ${v}\n`).join('')}`)
+      .join('')}`
+  }
+  async function listed(home: string): Promise<{ providerId: string; current?: { baseUrl?: string } }[]> {
+    const h = await createHarness({ settings: home, launchEnvironment: {} })
+    try {
+      return ((await h.acp.request('providers/list', {} as never)) as { providers: never[] }).providers
+    } finally { await h.retire() }
+  }
+
+  it('生产缺省：文档在 $DSH_HOME/deepseek-acp/ 下，旧文档只作导入来源', async () => {
+    // harness 显式给了路径，测不到缺省值；这里直接看部署用的那一份。
+    const home = realTempDir('dsacp-settings-default-')
+    const saved = process.env['DSH_HOME']
+    process.env['DSH_HOME'] = home
+    try {
+      const ctx = new Context()
+      await ctx.plugin(Loader, { baseUrl: import.meta.url })
+      await ctx.plugin(AcpSettings, {})
+      expect(ctx.acpSettings.documentPath).toBe(join(home, 'deepseek-acp', 'settings.yaml'))
+      expect(ctx.acpSettings.legacyPaths).toEqual([join(home, 'settings.yaml'), join(home, 'settings.yaml.imported')])
+    } finally {
+      if (saved === undefined) delete process.env['DSH_HOME']
+      else process.env['DSH_HOME'] = saved
+    }
+  })
+
+  it('写入只落在适配器自己的文档，从不创建上游会改名的那个文件', async () => {
+    const home = realTempDir('dsacp-settings-own-')
+    const h = await createHarness({ settings: home, launchEnvironment: {} })
+    try {
+      await h.acp.request('providers/set', {
+        providerId: 'openai', apiType: 'openai-completions', baseUrl: 'https://fixture.invalid/v1',
+      } as never)
+    } finally { await h.retire() }
+    expect(existsSync(join(home, 'deepseek-acp', 'settings.yaml'))).toBe(true)
+    expect(existsSync(join(home, 'settings.yaml'))).toBe(false)
+  })
+
+  it('0.9.0 写的旧文档被只读导入：升级后路由还在，旧文件逐字节不变', async () => {
+    const home = realTempDir('dsacp-settings-legacy-')
+    writeFileSync(join(home, 'settings.yaml'), LEGACY)
+    expect(await listed(home)).toContainEqual(expect.objectContaining({
+      providerId: 'openai', current: expect.objectContaining({ baseUrl: 'https://legacy.invalid/v1' }),
+    }))
+    // 第一次修改把导入的内容连同修改落进自己的文档；旧文档仍归旧版本所有。
+    const h = await createHarness({ settings: home, launchEnvironment: {} })
+    try {
+      await h.acp.request('providers/set', {
+        providerId: 'anthropic', apiType: 'anthropic-messages', baseUrl: 'https://fixture.invalid',
+      } as never)
+    } finally { await h.retire() }
+    expect(readFileSync(join(home, 'settings.yaml'), 'utf8')).toBe(LEGACY)
+    const own = readFileSync(join(home, 'deepseek-acp', 'settings.yaml'), 'utf8')
+    expect(own).toContain('https://legacy.invalid/v1')
+    expect(own).toContain('anthropic')
+  })
+
+  it('旧文档已被上游改名成 .imported 时照样导入，旧的 Azure id 换成新 id', async () => {
+    const home = realTempDir('dsacp-settings-imported-')
+    writeFileSync(join(home, 'settings.yaml'), stringifyPiAi({
+      'azure-openai-responses': { api: 'openai-responses', baseURL: 'https://azure.invalid/openai/v1' },
+    }))
+    // 模拟上游启动：它对这个文件做的正是一次 rename。
+    renameSync(join(home, 'settings.yaml'), join(home, 'settings.yaml.imported'))
+    const providers = await listed(home)
+    expect(providers).toContainEqual(expect.objectContaining({
+      providerId: 'azure', current: expect.objectContaining({ baseUrl: 'https://azure.invalid/openai/v1' }),
+    }))
+    expect(providers.find((p) => p.providerId === 'azure-openai-responses')).toBeUndefined()
+  })
+
+  it('读不懂的旧文档不挡启动 —— 它归别人所有，内容不由我们保证', async () => {
+    const home = realTempDir('dsacp-settings-broken-')
+    writeFileSync(join(home, 'settings.yaml'), 'llm-pi-ai: [unterminated\n')
+    const providers = await listed(home)
+    expect(providers.some((p) => p.providerId === 'openai')).toBe(true)
   })
 })

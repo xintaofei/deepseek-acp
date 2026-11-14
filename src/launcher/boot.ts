@@ -6,7 +6,8 @@
  * @module
  */
 
-import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { dirname, join, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -16,6 +17,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import * as CompactCommand from '@deepseek-ai/dsh-command-compact'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import BasicCompaction from '@deepseek-ai/dsh-compaction-basic'
+import * as ImageOffload from '@deepseek-ai/dsh-compaction-image-offload'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -47,7 +49,8 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import { composeLsp, discoverLspServers, type LspServerSpec } from '../composition/lsp.js'
 import { AcpSettings } from '../composition/settings.js'
-import { ensurePiAi, settingsMentionsPiAi } from '../composition/pi-ai.js'
+import { SessionListIndex } from '../session/list-index.js'
+import { ensurePiAi } from '../composition/pi-ai.js'
 import { mountNativeShell } from '../composition/shell.js'
 import * as acpBridge from '../index.js'
 import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
@@ -107,6 +110,21 @@ export function sessionsRoot(env: NodeJS.ProcessEnv): string {
   return explicit !== undefined && explicit.length > 0
     ? explicit
     : join(resolveDshHome(undefined, env), 'sessions')
+}
+
+/**
+ * `session/list` 标题索引的文件位置（见 `src/session/list-index.ts`）。
+ *
+ * 放在会话根的**旁边**而不是里面：会话根与上游 CLI / 桌面端共用，里面的目录结构
+ * 归上游的持久化后端管，塞进一个它不认识的文件不是我们能做的决定。文件名带上会话根
+ * 的哈希，`DEEPSEEK_ACP_SESSIONS_ROOT` 指向别处时各用各的，不会串。缺省的会话根是
+ * `$DSH_HOME/sessions`，索引因此落在 `$DSH_HOME/deepseek-acp/` 下，与设置文档同一处。
+ * @param root - 会话根
+ */
+export function sessionListIndexPath(root: string): string {
+  const absolute = resolve(root)
+  const digest = createHash('sha256').update(absolute).digest('hex').slice(0, 16)
+  return join(dirname(absolute), 'deepseek-acp', `session-index-${digest}.json`)
 }
 
 /**
@@ -247,6 +265,9 @@ export async function composeAgent(
   // 会话日志落盘 —— `session/load` / `session/list` 的**唯一**真值来源。
   // 没有它这两个方法不会被 advertise，也会直接 methodNotFound（见 initialize.ts）。
   await ctx.plugin(JsonlPersistence, { root: options.sessionsRoot })
+  // 列表的标题索引：没有它，DSH 0.2 上的 v3 旧日志会让每次 `session/list` 都要
+  // 几十秒（逐条读是 O(N²)）。理由与做法见 `src/session/list-index.ts`。
+  await ctx.plugin(SessionListIndex, { path: sessionListIndexPath(options.sessionsRoot) })
   // 会话标题（US-22）。**不注册任何 provider**：内置的确定性回退直接取第一条
   // 用户消息的前几个词，不花 token、不引第二条模型路由，而会话选择器要的
   // 「这条是哪次对话」它已经答得上了。真要更好的标题是另起一个 provider 的事。
@@ -360,6 +381,15 @@ export async function composeAgent(
   // 图片字节落进 `$DSH_HOME/attachments/v1/` 的内容寻址库，会话日志里只留引用。
   // 直接把 base64 写进日志会让一条日志涨到几十 MB，而每次恢复都要整份读回来。
   await ctx.plugin(LocalAttachments, {})
+  // 图片超预算时的恢复：DSH 0.2 起适配器不再自己丢最旧的图，而是以
+  // `IMAGE_OFFLOAD_REQUIRED` 失败，只有这个插件会接住它——记一条 `image/offload`
+  // 选出最旧的若干张换成占位文本，再重试这一步。没挂它，图片一多的会话会在某一轮
+  // 突然以那个错误码失败，此后每一轮都一样。
+  //
+  // 它同时注册 `image/offload` 的消息投影：日志里一旦有这种事件（我们写的，或
+  // 共用会话根的上游桌面端写的），不挂它这条会话就恢复不出来。所以不跟着
+  // 「部署收不收图」走，一律挂。无配置。
+  await ctx.plugin(ImageOffload)
 
   // ── 语言服务器（模型面 `lsp` 工具）──────────────────────────────────
   // 一台机器上一个语言服务器都找不到时整套不挂：`tool-lsp` 会往**每一次**请求的
@@ -463,7 +493,7 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   // 会把这 5 秒加到每一次编辑器启动上（实测首次应答 ~3s → ~4-10s）。没配路由的
   // 部署什么都不损失——`providers/*` 那条线会在用户真的去配的时候现拉。
   // 理由与判据见 `src/composition/pi-ai.ts`。
-  if (await settingsMentionsPiAi(ctx.acpSettings.documentPath)) {
+  if (ctx.acpSettings.mentionsPiAi()) {
     await ensurePiAi(ctx)
   }
   await ctx.plugin(acpBridge, { ...readEnv(env), onClosed } as never)

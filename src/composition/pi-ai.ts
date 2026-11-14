@@ -16,15 +16,12 @@
  * 2. **首次 `providers/*` 调用时** —— 用户打开了 provider 配置界面，这是一次明确
  *    的交互，等一下是可以接受的；而它不发生在启动路径上。
  *
- * ## 那个预筛为什么可以是子串匹配
- *
- * 判据「设置文档里有没有 `llm-pi-ai`」故意做得很粗：**猜错的代价是不对称的**。
- * 误判为「有」只是白付一次加载（行为完全正确，只是慢）；误判为「无」才会让用户
- * 配好的路由静默失效。子串匹配不会漏——YAML 的段名就是这个字面量——只可能多。
+ * 第 1 条的判据是 `AcpSettings.mentionsPiAi()`：它看的是**当前生效**的文档——
+ * 自己那份，或还没有时只读导入的旧文档——所以 0.9.0 配过路由的用户升级后照样在
+ * 启动时加载。判据的取舍（拿不准就答「有」）写在那里。
  * @module
  */
 
-import { readFile } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 
@@ -96,21 +93,4 @@ export async function ensurePiAi(ctx: Context): Promise<void> {
   }
   try { await mounting }
   finally { if (mounts.get(ctx.root) === mounting) mounts.delete(ctx.root) }
-}
-
-/**
- * 设置文档里是否提到了 pi-ai。
- *
- * 读不到文件（还没配置过）就是「没提到」：那正是绝大多数部署的状态，也正是这个
- * 优化要照顾的那一档。
- * @param documentPath - 设置文档路径；provider 没有文件后端时 undefined
- * @returns 需要在启动时就加载则 true
- */
-export async function settingsMentionsPiAi(documentPath: string | undefined): Promise<boolean> {
-  if (documentPath === undefined) return false
-  try {
-    return (await readFile(documentPath, 'utf8')).includes('llm-pi-ai')
-  } catch {
-    return false
-  }
 }

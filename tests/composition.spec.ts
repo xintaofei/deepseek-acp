@@ -113,6 +113,11 @@ describe('TC-COMP-04 M1-c 的服务都在', () => {
     }
   }, 30_000)
 
+  it('图片超预算的恢复已挂上 —— 否则 IMAGE_OFFLOAD_REQUIRED 无人接、带 image/offload 的日志也读不回来', async () => {
+    const ctx = await composed()
+    expect(ctx.sessions.messageProjections.map((p) => p.type)).toContain('image/offload')
+  }, 30_000)
+
   it('plan 引导段告诉模型方案要以 # 标题开头 —— 上游会照这条硬校验', () => {
     // `exit_plan_mode` 用 `/^#\s+\S/` 校验方案文本，不满足直接拒绝这次退出。
     // 提示里不写，模型只能撞几次墙才知道；这两处是同一条规则的两半。

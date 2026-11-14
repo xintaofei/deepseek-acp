@@ -15,7 +15,7 @@ import { realTempDir } from './temp-dir.js'
 /** 这个部署的设置文档全文；还没写过时为空串。 */
 function settingsText(home: string): string {
   try {
-    return readFileSync(join(home, 'settings.yaml'), 'utf8')
+    return readFileSync(join(home, 'deepseek-acp', 'settings.yaml'), 'utf8')
   } catch {
     return ''
   }

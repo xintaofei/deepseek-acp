@@ -22,9 +22,15 @@
 生成 v4 后继文件并保留原始 v3 字节。旧内核不能读取生成的 v4 日志。
 
 原有编辑器功能仍在范围内：流式输出、工具卡片、审批、提问、会话恢复与分叉、
-模型选择、MCP 和 provider 配置。ACP provider 配置继续使用
-`$DSH_HOME/settings.yaml` 与凭据存储，不修改原生 DSH profile；官方 API Key
-路由由部署配置管理，在 ACP provider 编辑器内只读。
+模型选择、MCP 和 provider 配置。ACP provider 配置写在
+`$DSH_HOME/deepseek-acp/settings.yaml`（密钥进凭据存储），不修改原生 DSH profile。
+原来的 `$DSH_HOME/settings.yaml` 不再写入：上游 DSH 0.2 启动时会把它改名成
+`settings.yaml.imported`。0.9.0 配好的路由会从这两个文件之一只读导入，直到第一次修改。
+官方 API Key 路由由部署配置管理，在 ACP provider 编辑器内只读。
+
+升级后的第一次 `session/list` 要把每条 v3 旧日志读一遍，而在 DSH 0.2 上每读一条都要
+扫一遍整个会话根。列表在约两秒内先应答，来不及读的会话这一次没有标题；剩下的在后台
+读完，存进会话根旁边的索引，之后的列表标题齐全，没变过的日志也不再重读。
 
 **内核升级不等于接入官方全部能力。** 本次没有新增原生后台任务、子 agent 委派、
 官方账号登录与搜索、桌面扩展组合。表单提问也取决于客户端能力：授权按钮降级

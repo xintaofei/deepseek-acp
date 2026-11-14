@@ -25,9 +25,18 @@ logs and publishes a v4 successor while retaining the original v3 bytes. Migrati
 subject to the upstream format policy; an old harness cannot read the resulting v4 log.
 
 The existing editor features remain in scope: streaming, tool cards, approval, questions,
-session restore/fork, model selection, MCP, and provider configuration. ACP provider edits keep
-using `$DSH_HOME/settings.yaml` and the credential store, without modifying native DSH profiles.
-The official API-key route remains deployment-owned and read-only in the ACP provider editor.
+session restore/fork, model selection, MCP, and provider configuration. ACP provider edits are
+stored in `$DSH_HOME/deepseek-acp/settings.yaml` (secrets go to the credential store), without
+modifying native DSH profiles. The previous location, `$DSH_HOME/settings.yaml`, is no longer
+written: upstream DSH 0.2 renames that file to `settings.yaml.imported` when it starts. Routes
+configured with 0.9.0 are imported read-only from either file until the first edit. The official
+API-key route remains deployment-owned and read-only in the ACP provider editor.
+
+The first `session/list` after upgrading has to read each old v3 log once, and on DSH 0.2 each of
+those reads scans the whole session root. The list answers within about two seconds, so sessions
+that were not read in time show up without a title. The reads continue in the background and are
+saved to an index next to the session root, so later lists have every title and do not reopen
+unchanged logs.
 
 **A newer kernel does not mean all official features are exposed.** Native background jobs,
 child-agent delegation, official account login/search, and the desktop extension composition are
