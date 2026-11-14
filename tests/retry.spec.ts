@@ -12,8 +12,18 @@
  * 只关心「几次、最后怎样、用户看到了什么」。
  */
 
+import { Context } from '@deepseek-ai/cordis'
+import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
+import LlmService, { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
+import {
+  DEEPSEEK_PROVIDER_CONFIG,
+  DEEPSEEK_RETRY_POLICY,
+  DEFAULT_MODEL,
+  DEFAULT_PROVIDER,
+} from '../src/launcher/boot.js'
 import { mapEvent } from '../src/mapping/updates.js'
 import { retryNoticeText } from '../src/mapping/retry-notice.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
@@ -220,4 +230,67 @@ describe('TC-RETRY-06 提示文字', () => {
     const startedEvent = { type: 'llm/retry-started', data: { retryId: 'r', turn: 2, step: 1, retry: 1 } } as unknown as SessionEvent
     expect(mapEvent(startedEvent)).toEqual([])
   })
+})
+
+describe('TC-RETRY-07 响应流中途断开（STREAM_CLOSED，#5）', () => {
+  /** 退避压到 1 ms、次数照部署：只换「多久」，不换「重试哪些码」。 */
+  const deployedCodes = { ...DEEPSEEK_RETRY_POLICY, backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 } }
+
+  it('官方路由真正生效的策略：上游默认的每个码都在，另加 STREAM_CLOSED', async () => {
+    // 挂真的适配器与部署配置，读运行时**捕获下来**的策略，而不是只看我们传了什么：
+    // 适配器若不接这个字段（或换了名字），这里拿到的就是上游默认，用例会红。
+    const ctx = new Context()
+    ctx.provide('launchEnvironment', createLaunchEnvironmentSnapshot([
+      { source: 'process', values: { DEEPSEEK_API_KEY: 'sk-offline-retry-fixture' } },
+    ]))
+    await ctx.plugin(LlmService)
+    // 非官方源：不去拉 `/models` 列表，一个包都不发（理由见 models.spec 的 OFFLINE_BASE_URL）。
+    await ctx.plugin(LlmDeepSeek, { ...DEEPSEEK_PROVIDER_CONFIG, baseURL: 'https://retry-fixture.invalid/anthropic' })
+
+    const prepared = await ctx.llm.prepareCall({ provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL })
+    const policy = prepared.retryPolicy
+    const upstream = resolveRetryPolicy(undefined, 'upstream default')
+    if (policy.mode !== 'normal' || upstream.mode !== 'normal') throw new Error('expected normal-mode policies')
+
+    expect(policy.retryableCodes).toContain('STREAM_CLOSED')
+    // 是在上游默认之上**加**一个，不是换掉：哪天上游默认多了一个码，也照样继承。
+    expect(policy.retryableCodes).toEqual(expect.arrayContaining([...upstream.retryableCodes]))
+    expect(policy.retryableCodes).toHaveLength(upstream.retryableCodes.length + 1)
+    // 次数与退避仍是上游默认。
+    expect(policy.maxRetries).toBe(upstream.maxRetries)
+    expect(policy.initialDelayMs).toBe(upstream.initialDelayMs)
+    expect(policy.maxDelayMs).toBe(upstream.maxDelayMs)
+  })
+
+  it('吐了半句后流被截断：照部署的策略重试，这一轮照常作答，提示说清是流断了', async () => {
+    const h = await createHarness({ retry: true, retryPolicy: deployedCodes })
+    const seen = capture(h)
+    const sessionId = await newSession(h)
+    h.llm.deltas = ['半句']
+    h.llm.errorFinishOnce = { code: 'STREAM_CLOSED', message: 'DeepSeek Messages stream ended before message_stop' }
+
+    const result = await prompt(h, sessionId, '说点什么')
+    expect(result.stopReason).toBe('end_turn')
+    expect(h.llm.calls).toBe(2)
+    expect(notices(seen)).toHaveLength(1)
+    expect(notices(seen)[0]).toContain('响应流中途断开')
+    expect(messageText(seen)).toBe(`半句${notices(seen)[0]}半句`)
+    h.disposeBridge()
+  }, 30_000)
+
+  it('对照：上游默认的码表不重试 STREAM_CLOSED —— 上一条重试成功靠的是部署的策略', async () => {
+    // 不给 `retryableCodes`，即上游默认。要是这里也重试了，上一条就什么都没证明。
+    const h = await createHarness({
+      retry: true,
+      retryPolicy: { mode: 'normal', maxRetries: 3, backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 } },
+    })
+    const seen = capture(h)
+    const sessionId = await newSession(h)
+    h.llm.failNext = [{ code: 'STREAM_CLOSED', message: 'stream ended before message_stop' }]
+
+    await expect(prompt(h, sessionId, '你好')).rejects.toThrow(/stream ended before message_stop/)
+    expect(h.llm.calls).toBe(1)
+    expect(notices(seen)).toEqual([])
+    h.disposeBridge()
+  }, 30_000)
 })

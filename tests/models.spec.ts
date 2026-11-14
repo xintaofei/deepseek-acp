@@ -16,7 +16,7 @@ import LlmService from '@deepseek-ai/dsh-llm'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import { describe, expect, it } from 'vitest'
-import { DEEPSEEK_MODELS, DEFAULT_MODEL, DEFAULT_PROVIDER } from '../src/launcher/boot.js'
+import { DEEPSEEK_MODELS, DEEPSEEK_PROVIDER_CONFIG, DEFAULT_MODEL, DEFAULT_PROVIDER } from '../src/launcher/boot.js'
 
 /** 官方已下线、但仍能调通的旧 id。摆进选择器就是误导，见 `DEEPSEEK_MODELS`。 */
 const RETIRED = ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']
@@ -46,10 +46,11 @@ async function llmOnly(catalog: 'ours' | 'upstream' = 'ours'): Promise<Context> 
     { source: 'process', values: { DEEPSEEK_API_KEY: 'sk-offline-catalog-fixture' } },
   ]))
   await ctx.plugin(LlmService)
+  // `ours` 挂的就是部署那份配置（`DEEPSEEK_PROVIDER_CONFIG`），不另抄一份：抄的那份
+  // 会和 boot.ts 慢慢漂开，用例测的就不再是真正发出去的东西了。
   await ctx.plugin(LlmDeepSeek, {
-    reasoningEffort: 'high',
+    ...(catalog === 'ours' ? DEEPSEEK_PROVIDER_CONFIG : { reasoningEffort: 'high' }),
     baseURL: OFFLINE_BASE_URL,
-    ...(catalog === 'ours' ? { models: DEEPSEEK_MODELS } : {}),
   })
   return ctx
 }

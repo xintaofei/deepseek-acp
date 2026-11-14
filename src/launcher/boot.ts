@@ -23,7 +23,7 @@ import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
-import LlmService from '@deepseek-ai/dsh-llm'
+import LlmService, { resolveRetryPolicy, type RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import type { DeepSeekCatalogModel } from '@deepseek-ai/dsh-llm-deepseek'
 import PlanMode from '@deepseek-ai/dsh-plan-mode'
@@ -216,6 +216,54 @@ export const DEEPSEEK_MODELS: DeepSeekCatalogModel[] = [
     description: '价格更高，不支持图像理解；上游建议用于复杂或对质量要求高的任务。',
   },
 ]
+
+/** 上游给 provider 的默认可重试错误码，取自上游自己的解析结果而不是抄一份。 */
+function upstreamRetryableCodes(): readonly string[] {
+  const policy = resolveRetryPolicy(undefined, 'deepseek-acp: upstream default retryPolicy')
+  return policy.mode === 'normal' ? policy.retryableCodes : []
+}
+
+/**
+ * 官方路由的重试策略：上游默认值，再加上 `STREAM_CLOSED`（issue #5）。
+ *
+ * `STREAM_CLOSED` 是「响应流正常关闭、却没收到结束标记」：网关或上游中途掐断了
+ * 连接，最后仍以 HTTP 200 收尾。它和默认就重试的 `TRANSPORT`、`EMPTY_RESPONSE` 一样
+ * 没有副作用：这一步还没结束，回答没有落成 `assistant/message`，工具调用也没执行，
+ * 重发同一个请求不会把哪个工具跑两遍。已经吐出的半句由重试提示接住（见
+ * `mapping/updates.ts`），与 `TRANSPORT` 断在半路时的处理相同。上游把它列为可选码，
+ * 默认不开，但长推理流经过不稳定网关时它恰恰是最常见的失败，不重试的话这一轮直接
+ * 报废，用户只能手动重发。
+ *
+ * 代价：如果网关**每次**都在同一处截断，就会白白多发 `maxRetries` 次计费请求。
+ * 策略只能按 provider 配，不能单独给某个码设上限，所以 `maxRetries` 与退避仍吃
+ * 上游默认（5 次，0.5 s 起、单次至多 10 s）。
+ *
+ * 只管 `deepseek-official`。pi-ai 路由的策略由用户在自己的路由配置里写 `retryPolicy`。
+ */
+export const DEEPSEEK_RETRY_POLICY: RetryPolicyConfig = {
+  mode: 'normal',
+  retryableCodes: [...new Set([...upstreamRetryableCodes(), 'STREAM_CLOSED'])],
+}
+
+/**
+ * `deepseek-official` 路由的部署配置（`dsh-llm-deepseek-api-key` 的 Config）。
+ *
+ * 导出是为了让用例挂的是**同一份**配置，而不是照着这里另抄一份（TC-MODEL-*）。
+ *
+ * 推理档位显式写出来，而不是吃默认。行为上这与不配是**一样**的：`LlmRuntime` 会
+ * 把适配器报告的 `defaultEffort` 物化进请求（`effective = requested ??
+ * reasoning.defaultEffort`），而适配器在未配置时报告的正是 `high`。写出来是为了让
+ * 「部署选了哪一档」在组合里是一句明文，而不是一条要读两个包才推得出来的默认值链：
+ * 这个默认值直接决定每次请求的延迟与 token 开销，不该藏着。
+ *
+ * 模型目录同样显式给出，理由与它的漂移风险见 {@link DEEPSEEK_MODELS}；重试策略见
+ * {@link DEEPSEEK_RETRY_POLICY}。
+ */
+export const DEEPSEEK_PROVIDER_CONFIG = {
+  reasoningEffort: 'high',
+  models: DEEPSEEK_MODELS,
+  retryPolicy: DEEPSEEK_RETRY_POLICY,
+} as const
 
 /** 从环境变量读取配置，缺省值集中在此。 */
 export interface LauncherEnv {
@@ -435,9 +483,10 @@ export async function composeAgent(
   // 0.9.0 起一直如此。它与上面那个挂在同一个「请求出错」钩子上，各管各的错误码，
   // 不认识的交给下一个，所以两者共存。
   //
-  // 策略归各 provider 的 `retryPolicy`，这里不配，吃上游默认：只重试 `TRANSPORT`、
+  // 策略归各 provider 的 `retryPolicy`，这里不配。上游默认只重试 `TRANSPORT`、
   // `TIMEOUT`、`RATE_LIMIT`、`SERVER`、`EMPTY_RESPONSE`，最多 5 次，500 ms 起指数
-  // 退避、单次至多 10 s，服务端给的 `Retry-After` 在这个上限内就照它等。认证失败、
+  // 退避、单次至多 10 s，服务端给的 `Retry-After` 在这个上限内就照它等；官方路由
+  // 在此之上多重试一个 `STREAM_CLOSED`，见 {@link DEEPSEEK_RETRY_POLICY}。认证失败、
   // 余额不足、请求本身有错都不重试——每次重试都是一次计费请求，必然再失败的不该再发。
   // 每次重试先在日志里记一条 `llm/retry`，客户端据此看到一行重试提示
   // （`mapping/updates.ts`），而不是对着一个不动的回答干等。
@@ -557,16 +606,8 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   // watch 关掉：agent 是「一个客户端连接 = 一个进程」的短命子进程，热重载没有
   // 收益，而 fs watcher 会一直持有事件循环，让进程在 stdin 关闭后不退出。
   await ctx.plugin(LocalCredentials, { watch: false })
-  // 推理档位显式写出来，而不是吃默认。
-  //
-  // 行为上这与不配是**一样**的：`LlmRuntime` 会把适配器报告的 `defaultEffort`
-  // 物化进请求（`effective = requested ?? reasoning.defaultEffort`），而适配器在
-  // 未配置时报告的正是 `high`。写出来是为了让「部署选了哪一档」在组合里是一句
-  // 明文，而不是一条要读两个包才推得出来的默认值链——这个默认值直接决定每次
-  // 请求的延迟与 token 开销，不该藏着。
-  //
-  // 模型目录同样显式给出，理由与它的漂移风险见 {@link DEEPSEEK_MODELS}。
-  await ctx.plugin(LlmDeepSeek, { reasoningEffort: 'high', models: DEEPSEEK_MODELS })
+  // 推理档位、模型目录与重试策略都显式给出，理由见 {@link DEEPSEEK_PROVIDER_CONFIG}。
+  await ctx.plugin(LlmDeepSeek, DEEPSEEK_PROVIDER_CONFIG)
   const shadowed = await shadowedApiKeyNotice(ctx)
   if (shadowed !== undefined) ctx.logger('credentials').warn('%s', shadowed)
   // ── 用户设置文档：多 provider 的配置面 ────────────────────────────────
