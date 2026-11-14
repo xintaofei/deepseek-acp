@@ -16,11 +16,16 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { clientTextReader, type RequestFn } from '../src/answerers/fs-read.js'
 import { DelegatedReadFileSystem, type ClientTextReader } from '../src/composition/session-fs.js'
+import { MODEL_OPTION } from '../src/config/options.js'
+import { FAKE_MODEL_VISION } from './fake-llm.js'
 import { createHarness, type TestHarness } from './harness.js'
 import { aliasDir, realTempDir } from './temp-dir.js'
 
 const DISK = '磁盘上的旧内容\n'
 const BUFFER = '编辑器里没保存的新内容\n'
+/** 一张真的 4×4 红色 PNG（与 images.spec 同一张）：准入会完整解码，假字节过不去。 */
+const RED_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVQImWP4z8AARwgWXg4ArpMP8bh5W0YAAAAASUVORK5CYII='
 
 interface Fixture {
   base: FileSystem
@@ -389,6 +394,49 @@ describe('TC-FS-04 端到端：ACP 反向请求 → read 工具', () => {
 
     expect(h.fsReads).toHaveLength(1)
     expect(rendered).toContain('磁盘上的旧内容')
+    h.disposeBridge()
+  }, 30_000)
+
+  it('委托开着时 read_image 照常可用，且读字节不走 fs/read_text_file（#12）', async () => {
+    // 上游 `dsh-tool-fs` 把 `read_image` 注册在 `ctx.inject(['attachments'], …)`
+    // 里，没声明 `fs`，执行时却要读 `ctx.fs`。会话作用域 `isolate('fs')` 之后，
+    // cordis 4.0.2 上这一读会抛「cannot get property "fs" without inject」，只在委托
+    // 开着时出现。cordis 4.1.0 起能沿父级找到隔离后的 `fs`，但上游那处声明至今
+    // 没补，所以把这条路钉住：cordis 的查找规则再变，这里先红。
+    const h = await createHarness({ fs: true, fsRead: true, attachments: realTempDir('dsacp-att-') })
+    h.llm.offerVisionModel = true
+    const dir = realTempDir('dsacp-e2e-img-')
+    const image = join(dir, 'red.png')
+    writeFileSync(image, Buffer.from(RED_PNG, 'base64'))
+    const text = join(dir, 'buf.txt')
+    writeFileSync(text, DISK, 'utf8')
+    h.setFsReadResponder(() => ({ content: BUFFER }))
+
+    const { sessionId } = await h.acp.request('session/new', { cwd: dir, mcpServers: [] })
+    await h.acp.request('session/set_config_option', {
+      sessionId: sessionId as never,
+      configId: MODEL_OPTION as never,
+      value: FAKE_MODEL_VISION as never,
+    })
+    const cards: { status?: string; content?: unknown }[] = []
+    h.onUpdate((raw) => {
+      const u = raw as { sessionUpdate: string; status?: string; content?: unknown }
+      if (u.sessionUpdate === 'tool_call_update') cards.push(u)
+    })
+
+    h.llm.toolCall = { id: 'img-1', name: 'read_image', args: JSON.stringify({ file_path: image }) }
+    await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '看图' }] })
+    expect(cards.at(-1)?.status).toBe('completed')
+    expect(JSON.stringify(cards)).toContain('image/png image, 4x4 px')
+    expect(JSON.stringify(cards)).not.toContain('without inject')
+    // 二进制读不该问客户端：`fs/read_text_file` 没有字节语义。
+    expect(h.fsReads).toEqual([])
+
+    // 前提自检：同一个会话里文本读确实改道了。不然上面那条可能根本没走委托那条路。
+    h.llm.toolCall = { id: 'read-1', name: 'read', args: JSON.stringify({ file_path: text }) }
+    await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '读一下' }] })
+    expect(h.fsReads.map((r) => r.path)).toEqual([text])
+    expect(JSON.stringify(cards)).toContain('编辑器里没保存的新内容')
     h.disposeBridge()
   }, 30_000)
 
