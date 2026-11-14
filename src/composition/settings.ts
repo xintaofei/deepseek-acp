@@ -32,7 +32,7 @@
 
 import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { Context, Service, resolveConfig } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import Schema from '@deepseek-ai/schemastery'
@@ -218,8 +218,9 @@ export class AcpSettings extends Service {
       const entry = [...loader.entries()].find((entry) => entry.options.name === '@deepseek-ai/dsh-llm-pi-ai')
       const fiber = entry?.fiber
       if (entry === undefined || fiber === undefined) throw new Error('Provider configuration is not loaded')
-      const candidate = fiber.ctx.waterfall(fiber, 'internal/config', section, () => section)
-      resolveConfig(fiber.runtime!, candidate)
+      // 先校验候选值、不发布：`Fiber.resolveConfig` 跑一遍该插件的 `internal/config`
+      // 钩子与 Config schema，拒绝就抛 `ValidationError`，线上路由一个字都没动。
+      fiber.resolveConfig(section)
       const before = structuredClone(entry.options.config ?? {})
       try {
         await loader.update(entry.id, { config: section })

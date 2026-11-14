@@ -111,6 +111,21 @@ describe('TC-COMP-01 工具集', () => {
   }, 30_000)
 })
 
+describe('TC-COMP-09 工具执行器已选定（DSH 0.2.2）', () => {
+  // 0.2.2 把「怎么执行工具」从 `dsh-tools` 拆成了独立插件（原生 / PTC）。漏挂时工具
+  // 照样注册、上面几条照样绿，typecheck 也是绿的；坏在模型那一侧：每一步装配提示词
+  // 都抛 `ToolExecutorUnavailableError`，一轮对话都跑不起来。所以这里走模型实际
+  // 走的那条路——按会话作用域装配一次，断工具真的进了请求。
+  it('会话作用域装配提示词时，工具定义经执行器进了请求', async () => {
+    const { ctx, agent } = await scoped()
+    const assembled = await ctx.systemPrompt.assemble({ scope: agent })
+    const names = (assembled.tools as { name: string }[] | undefined)?.map((tool) => tool.name) ?? []
+    for (const name of [NATIVE_SHELL_TOOL, 'read', 'edit', 'ask_user_question']) {
+      expect(names, `请求里缺少工具 ${name}`).toContain(name)
+    }
+  }, 30_000)
+})
+
 describe('TC-COMP-04 M1-c 的服务都在', () => {
   it('命令面、plan mode、提问 seam、标题服务均已挂载', async () => {
     const ctx = await composed()

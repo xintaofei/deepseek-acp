@@ -44,6 +44,7 @@ import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import * as FsSearchTool from '@deepseek-ai/dsh-tool-fs-search'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import * as TodoTool from '@deepseek-ai/dsh-tool-todo'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
@@ -94,7 +95,12 @@ export const PLAN_SECTION = [
   '提交给 exit_plan_mode 的方案必须是 Markdown，且以一个 `# ` 标题开头。',
 ].join('\n')
 
-/** 工作区指令加载的字节上限：AGENTS.md / CLAUDE.md 合计。 */
+/**
+ * 指令文件的字节上限，**按链算**：项目那条链（项目根到 cwd 的 AGENTS.md / CLAUDE.md
+ * 及覆盖层）与用户全局那条链（`$DSH_HOME`、`$DSH_AGENTS_HOME` 下的 AGENTS.md）各占
+ * 一份。DSH 0.2.2 起如此，此前是两条合计一份，项目指令一长就把全局约定挤掉。两条都
+ * 有时一次注入最多是它的两倍。
+ */
 const INSTRUCTIONS_MAX_BYTES = 40_000
 
 /**
@@ -145,6 +151,14 @@ export const DEFAULT_PROVIDER = 'deepseek-official'
 export const DEFAULT_MODEL = 'deepseek-flash'
 
 /**
+ * 两个官方模型的上下文窗口：2^20 = 1,048,576 个 token，官方 `/models` 列表声明的值，上游内置
+ * 目录自 DSH 0.2.2 起也写的是它。定价页写的「1M」是取整，适配器在条目缺省时回落的
+ * `defaultContextWindow` 是十进制的 1,000,000——差 4.6 万个 token，用量进度条的分母
+ * 与自动压缩的触发点都按它算，所以这里显式写出来，不吃那个回落值。
+ */
+const OFFICIAL_CONTEXT_WINDOW = 1_048_576
+
+/**
  * 本部署 advertise 的 DeepSeek 模型目录。
  *
  * ## 为什么还要覆盖
@@ -157,13 +171,18 @@ export const DEFAULT_MODEL = 'deepseek-flash'
  * 0.2 加的 `toolUpdate` 就这样丢过一次。所以 TC-MODEL-03 拿上游自带目录逐条对比
  * 除展示文字外的每个字段，上游一动用例就红——到那时要么照抄，要么干脆删掉覆盖。
  *
+ * 覆盖还有第二个代价（DSH 0.2.2 起）：适配器只在目录**等于内置目录**时才去跟官方
+ * 的 `/models` 列表（在售与否、最低客户端版本、角标都以服务端为准）。覆盖了就不跟，
+ * 选择器里永远是这两条。我们接受它：跟列表意味着 `session/new` 列模型、首轮请求都
+ * 可能先等一次网络（缺省最多 5 秒），离线时再退回内置目录——对一个每次连接都新起
+ * 进程的编辑器适配器，这比一份要手工同步的静态目录更贵。
+ *
  * 目录是**建议性**的：它决定选择器里有什么、以及图片准入怎么判，不限制
  * `DEEPSEEK_ACP_MODEL` 能填什么——要用某个老 id 或内部灰度模型，环境变量照样直通。
  *
- * 未列出的字段吃适配器默认：`contextWindow` 回落到 `defaultContextWindow`（1M，
- * 与定价页相同），图片预算回落到适配器的默认值。`maxTokens` 同样不动——定价页写的
- * 384K 是**上限**，而适配器选的 256K 已经远超一次编码回答的量级，把上限拉满只会
- * 抬高单轮的最坏成本。
+ * 未列出的字段吃适配器默认：图片预算回落到适配器的默认值。`maxTokens` 同样不动——
+ * 定价页写的 384K 是**上限**，而适配器选的 256K 已经远超一次编码回答的量级，把上限
+ * 拉满只会抬高单轮的最坏成本。
  *
  * @see https://api-docs.deepseek.com/zh-cn/quick_start/pricing
  */
@@ -172,6 +191,7 @@ export const DEEPSEEK_MODELS: DeepSeekCatalogModel[] = [
     id: DEFAULT_MODEL,
     name: 'DeepSeek-V4.1-Flash',
     description: '更快更省，支持图像理解。日常编码的默认档。',
+    contextWindow: OFFICIAL_CONTEXT_WINDOW,
     inputModalities: ['text', 'image'],
     // 下面两项是**提示缓存**的开关，漏掉都不报错，只会让 KV cache 命中率静默下降，
     // 所以照抄上游，不省。
@@ -189,6 +209,7 @@ export const DEEPSEEK_MODELS: DeepSeekCatalogModel[] = [
     // 选择器里显示的是「选哪个模型」，而 `0813` 是同一个模型的哪一版快照——
     // id 不带它，官方也随时可能把它指向新快照。上游自带目录的写法同此。
     name: 'DeepSeek-V4-Pro',
+    contextWindow: OFFICIAL_CONTEXT_WINDOW,
     // 0.9.0 写的是「官方已宣布有序下线」。2026-11 的定价页已没有这句话，它照常在售，
     // 所以只写能从定价页核实的差别：更贵、不收图。「适合复杂任务」是上游目录的说法。
     description: '价格更高，不支持图像理解；上游建议用于复杂或对质量要求高的任务。',
@@ -241,6 +262,11 @@ export async function composeAgent(
   for (const plugin of [SessionService, LlmService, ToolRegistry, AgentRegistry, AgentLoop]) {
     await ctx.plugin(plugin, {})
   }
+  // 工具**执行器**。DSH 0.2.2 把它从 `dsh-tools` 里拆了出来（原生 / PTC 二选一，
+  // 原来的 `tools.mode` 配置项已删）。不挂的话工具照样注册、照样能列出来，typecheck
+  // 也是绿的，但每一步模型请求都在装配提示词时抛 `ToolExecutorUnavailableError`
+  // ——等于整个 agent 一轮都跑不起来。挂在根作用域，就是这个部署的默认执行器。
+  await ctx.plugin(NativeToolExecutor)
   // 审批服务本身只是提问的接线板；真正的应答器由 bridge 注册（answerers/approval.ts）。
   // 没有应答器时链尾 fail-closed 成 `unavailable`。
   await ctx.plugin(WorkingDirectory, {})

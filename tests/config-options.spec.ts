@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import type { RouteChoice } from '../src/config/options.js'
-import { MODEL_OPTION, SANDBOX_OPTION, configOptions, decodeRouteValue } from '../src/config/options.js'
+import { MODEL_OPTION, REASONING_OPTION, SANDBOX_OPTION, configOptions, decodeRouteValue } from '../src/config/options.js'
 import type { SessionControls } from '../src/port/types.js'
 import { FAKE_MODEL, FAKE_MODEL_ALT, FAKE_PROVIDER, FAKE_PROVIDER_ALT } from './fake-llm.js'
 import { createHarness, waitFor } from './harness.js'
@@ -220,8 +220,87 @@ describe('TC-CFG-04 模型切换（US-16）', () => {
       sessionId: b.sessionId as never,
       prompt: [{ type: 'text', text: 'B 这一轮' }],
     })
-    // B 仍用原模型：选择 ref 是**按 agent 作用域**装的，不是进程级共享
+    // B 仍用原模型：选择记在 A 自己的会话日志里（`agent.model`），不是进程级共享
     expect(h.llm.modelsUsed.at(-1)).toBe(FAKE_MODEL)
+    h.disposeBridge()
+  }, 30_000)
+})
+
+/** 某个 select 的当前值。 */
+function currentOf(options: readonly SessionConfigOption[] | null | undefined, id: string): string | undefined {
+  const o = option(options, id)
+  return o?.type === 'select' ? o.currentValue : undefined
+}
+
+describe('TC-CFG-06 选择随会话保存（DSH 0.2.2）', () => {
+  // DSH 0.2.2 起模型选择归 agent 自己，**写进会话日志**（`model/selection`），恢复时
+  // 从日志折出来：先看还没被请求用掉的那次选择，再看最近一次请求实际用的模型，都没有
+  // 才退回这次连接的默认值。0.2.1 时选择只在内存里，重开会话就回到默认模型——用户
+  // 切到 Pro 聊了一半，重开编辑器后悄悄换回了 Flash，选择器上显示的也是 Flash。
+  //
+  // 两条分别钉住折叠的两个来源：只选过、没发过请求（只有选择事件）；发过请求（请求头
+  // 记着实际用的档位）。每条都断「显示值」与「实际发出去的值」两件事。
+  it('切了模型还没发请求就关掉，重开后仍是切过的那个，下一轮也发给它', async () => {
+    const root = realTempDir('dsacp-cfg-keep-')
+    const cwd = realTempDir('dsacp-cfg-')
+    const first = await createHarness({ sessionsRoot: root })
+    const { sessionId } = await first.acp.request('session/new', { cwd, mcpServers: [] })
+    await first.acp.request('session/set_config_option', {
+      sessionId: sessionId as never,
+      configId: MODEL_OPTION as never,
+      value: FAKE_MODEL_ALT as never,
+    })
+    // `retire()` 而非 `disposeBridge()`：要等写入方真的关掉，另一个 harness 才读得到
+    // 那条选择事件。理由见 harness 里 `retire` 的注释。
+    await first.retire()
+
+    const second = await createHarness({ sessionsRoot: root })
+    const loaded = await second.acp.request('session/load', { sessionId: sessionId as never, cwd, mcpServers: [] })
+    expect(currentOf(loaded.configOptions, MODEL_OPTION)).toBe(FAKE_MODEL_ALT)
+    await second.acp.request('session/prompt', { sessionId: sessionId as never, prompt: [{ type: 'text', text: '重开后' }] })
+    expect(second.llm.modelsUsed.at(-1)).toBe(FAKE_MODEL_ALT)
+    second.disposeBridge()
+  }, 30_000)
+
+  it('推理档位同样随会话保存 —— 发过请求之后重开，仍是那一档', async () => {
+    const root = realTempDir('dsacp-cfg-keep-')
+    const cwd = realTempDir('dsacp-cfg-')
+    const first = await createHarness({ sessionsRoot: root })
+    const { sessionId } = await first.acp.request('session/new', { cwd, mcpServers: [] })
+    await first.acp.request('session/set_config_option', {
+      sessionId: sessionId as never,
+      configId: REASONING_OPTION as never,
+      value: 'max' as never,
+    })
+    await first.acp.request('session/prompt', { sessionId: sessionId as never, prompt: [{ type: 'text', text: '一' }] })
+    expect(first.llm.effortsUsed.at(-1)).toBe('max')
+    await first.retire()
+
+    const second = await createHarness({ sessionsRoot: root })
+    const loaded = await second.acp.request('session/load', { sessionId: sessionId as never, cwd, mcpServers: [] })
+    expect(currentOf(loaded.configOptions, REASONING_OPTION)).toBe('max')
+    await second.acp.request('session/prompt', { sessionId: sessionId as never, prompt: [{ type: 'text', text: '二' }] })
+    expect(second.llm.effortsUsed.at(-1)).toBe('max')
+    second.disposeBridge()
+  }, 30_000)
+
+  it('fork 出来的子会话沿用父会话的模型 —— 选择随种子一起继承', async () => {
+    // fork 走的是另一条路：子会话是新建的，选择来自继承进来的那段种子日志，而不是
+    // `restoreSession`。父会话切过模型、用它聊过一轮，子会话就该接着用它。
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-cfg-')
+    const parent = await h.acp.request('session/new', { cwd, mcpServers: [] })
+    await h.acp.request('session/set_config_option', {
+      sessionId: parent.sessionId as never,
+      configId: MODEL_OPTION as never,
+      value: FAKE_MODEL_ALT as never,
+    })
+    await h.acp.request('session/prompt', { sessionId: parent.sessionId as never, prompt: [{ type: 'text', text: '父' }] })
+
+    const child = await h.acp.request('session/fork', { sessionId: parent.sessionId as never, cwd, mcpServers: [] } as never)
+    expect(currentOf(child.configOptions, MODEL_OPTION)).toBe(FAKE_MODEL_ALT)
+    await h.acp.request('session/prompt', { sessionId: child.sessionId as never, prompt: [{ type: 'text', text: '子' }] })
+    expect(h.llm.modelsUsed.at(-1)).toBe(FAKE_MODEL_ALT)
     h.disposeBridge()
   }, 30_000)
 })

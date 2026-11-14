@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 // `model-selection` 由包根 re-export（`export * from './model-selection.ts'`），
 // 没有 `./model-selection` 子路径导出。
-import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import { SANDBOX_MODES, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { ReasoningEffortId, createUserMessage, type LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
@@ -261,21 +261,6 @@ function nest(path: readonly string[], value: unknown): unknown {
 }
 
 /**
- * 会话建立时的模型选择。
- *
- * provider 缺失时整个 ref 留空：没有 provider 的选择无法路由，装上去只会在
- * 下一步把请求送进空处。此时模型配置项也不会 advertise。
- * @param provider - provider 路由
- * @param model - 模型 id
- */
-function initialSelection(provider: string | undefined, model: string | undefined): ModelSelectionRef {
-  return {
-    current: provider !== undefined && model !== undefined ? { provider, model } : undefined,
-    assembled: undefined,
-  }
-}
-
-/**
  * 基于 Cordis context 构造进程内 port。
  * @param ctx - 已注入 `agents` 的插件 context
  */
@@ -312,21 +297,19 @@ export function createInProcessPort(ctx: Context): HarnessPort {
    * `async` 且返回 `void`：工厂会对 setup 的返回值调 `.commit()`，直接把
    * Promise 交回去会崩（约束 C3，TC-CONTRACT-02 守护）。
    *
-   * `selection` 由调用方在 create 之前建好并传进来：装配发生在工厂内部，
-   * 而 bridge 需要在会话建成之后**长期持有**这个 ref 才能切模型。
    */
   const setupSession =
     (
       cwd: string | undefined,
       mcpServers: readonly McpMountSpec[] | undefined,
-      selection: ModelSelectionRef,
       readDelegate: ClientTextReader | undefined,
     ) =>
     async (agentCtx: Context): Promise<void> => {
       workspaceSection(agentCtx, cwd)
-      // 装到 agent 作用域：切换在**下一步**进入 prompt 装配时生效，不会把
-      // 正在跑的那一步劈成两半（一半用旧模型的提示词、一半发给新模型）。
-      installModelSelection(agentCtx, selection)
+      // DSH 0.2.2 起模型选择归 agent 自己（`agent.model`），这里装的只剩「换了模型
+      // 就给下一步补一句切换提示」那个 pre-step 监听：模型据此知道上面几轮是谁写的。
+      // 必须装在 agent 作用域，与上游的要求一致。
+      installModelSelection(agentCtx)
       // 文件工具也装在这里（US-25）：它是唯一读 `ctx.fs` 的插件，而它捕获
       // 自己的挂载 context，所以只有装在会话作用域，读改道才可能生效。
       await mountSessionFs(agentCtx, FsTool, readDelegate)
@@ -397,15 +380,20 @@ export function createInProcessPort(ctx: Context): HarnessPort {
 
   /**
    * 组装单会话控制面。
+   *
+   * 模型选择读写都经 `agent.model`（DSH 0.2.2）。它是**落盘**的：`select()` 往会话
+   * 日志里追加一条 `model/selection`，`current()` 从日志折出来——先看还没被请求用掉的
+   * 那次选择，再看最近一次请求实际用的模型，都没有才退回建 agent 时给的
+   * `agentOptions`。所以恢复与 fork 出来的会话沿用的是日志里的模型，不是这次连接的
+   * 默认值；默认值只管从没发过请求的会话。
    * @param agent - 该会话的 agent
-   * @param selection - 与 agent 作用域绑定的模型选择 ref
    */
-  const controlsFor = (agent: Agent, selection: ModelSelectionRef): SessionControls => {
+  const controlsFor = (agent: Agent): SessionControls => {
     /** 读当前选择的窗口；顺带把未命中的解析起起来。 */
     const windowNow = (): number | undefined => {
       // 读的是**当前**选择：会话内换了模型，窗口大小要跟着换，否则用量条的
       // 分母还停在旧模型上——那种错误看起来完全正常。
-      const current = selection.current
+      const current = agent.model.current()
       return current === undefined ? undefined : contextWindowOf(current.provider, current.model)
     }
     // 建会话时先热一次：否则本会话第一条 `assistant/message` 必然读到空缓存，
@@ -413,16 +401,16 @@ export function createInProcessPort(ctx: Context): HarnessPort {
     windowNow()
 
     return {
-      model: () => selection.current?.model,
-      provider: () => selection.current?.provider,
+      model: () => agent.model.current()?.model,
+      provider: () => agent.model.current()?.provider,
       contextWindow: windowNow,
-      reasoningEffort: () => selection.current?.reasoningEffort,
+      reasoningEffort: () => agent.model.current()?.reasoningEffort,
       setRoute: (provider: string, model: string) => {
         // **不再保留原 provider**：模型下拉现在是跨 provider 的分组列表，一次
-        // 选择同时定下走哪条路由与用哪个模型。上游的 `installModelSelection`
-        // 把整个 `{provider, model}` 对应用到请求上，换 provider 本就是合法的。
+        // 选择同时定下走哪条路由与用哪个模型。上游的选择本来就是完整的
+        // `{provider, model}` 对，换 provider 是合法的。
         //
-        // 仍然要求会话已有选择（`current !== undefined`）才写：没有初始路由的
+        // 仍然要求会话已有选择（`current() !== undefined`）才写：没有初始路由的
         // 会话（建会话时缺 provider/model）连模型配置项都不 advertise，此时收到
         // 一次设置只可能来自伪造的请求，凭空造一个选择等于替用户做了决定。
         //
@@ -431,17 +419,19 @@ export function createInProcessPort(ctx: Context): HarnessPort {
         // ——它校验有效档位在新词表里。也就是说不清空的后果是一次响亮的失败，
         // 不是静默走偏；清空把它变成一次平滑的重置，回到新模型的默认档，这正是
         // 上游对「未选中档位」的定义。跨 provider 时这一条更要紧：两个适配器的
-        // 档位词表可以毫无交集。
-        selection.current = selection.current === undefined ? undefined : { provider, model }
+        // 档位词表可以毫无交集。`select()` 不带档位就是「回到适配器默认」，不继承
+        // 上一次的档位，正好是这里要的语义。
+        if (agent.model.current() === undefined) return
+        agent.model.select({ provider, model })
         // 换模型同样要热：新模型的窗口没解析过，不热的话切换后第一轮的用量条
         // 会整条消失，看起来像功能坏了。
         windowNow()
       },
       setReasoningEffort: (effort: string) => {
-        const current = selection.current
-        // 没有选择 ref 就无处安放（缺 provider 的会话，档位项也不会 advertise）。
+        const current = agent.model.current()
+        // 没有选择就无处安放（缺 provider 的会话，档位项也不会 advertise）。
         if (current === undefined) return
-        selection.current = { ...current, reasoningEffort: ReasoningEffortId(effort) }
+        agent.model.select({ provider: current.provider, model: current.model, reasoningEffort: ReasoningEffortId(effort) })
       },
       sandboxMode: () => {
         const policy = ctx.get('sandboxPolicy')
@@ -781,7 +771,6 @@ export function createInProcessPort(ctx: Context): HarnessPort {
 
     sessions: {
       async create({ sessionId, cwd, provider, model, mcpServers, readDelegate }): Promise<AgentHandle> {
-        const selection = initialSelection(provider, model)
         const handle = await agents.create({
           sessionId,
           meta: { cwd },
@@ -791,16 +780,15 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             ...(provider !== undefined ? { provider } : {}),
             ...(model !== undefined ? { model } : {}),
           },
-          setup: setupSession(cwd, mcpServers, selection, readDelegate),
+          setup: setupSession(cwd, mcpServers, readDelegate),
         })
         return {
           agent: handle.agent,
           dispose: () => handle.dispose(),
-          controls: controlsFor(handle.agent, selection),
+          controls: controlsFor(handle.agent),
         }
       },
       async resume({ sessionId, provider, model, mcpServers, readDelegate }) {
-        const selection = initialSelection(provider, model)
         const handle = await agents.resume({
           resumeSessionId: sessionId,
           agentOptions: {
@@ -814,13 +802,13 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           // 的 agent 尚未发布，`ctx.agent` 那条服务路径此刻本就是空的（上游现在
           // 干脆不再提供它），而工厂把待发布的 agent 直接递进来了。
           setup: async (agentCtx: Context, agent: Agent) => {
-            await setupSession(agent.session.header.cwd, mcpServers, selection, readDelegate)(agentCtx)
+            await setupSession(agent.session.header.cwd, mcpServers, readDelegate)(agentCtx)
           },
         })
         return {
           agent: handle.agent,
           dispose: () => handle.dispose(),
-          controls: controlsFor(handle.agent, selection),
+          controls: controlsFor(handle.agent),
           cwd: handle.agent.session.header.cwd,
         }
       },
@@ -840,7 +828,6 @@ export function createInProcessPort(ctx: Context): HarnessPort {
         // 让它自己再读一遍盘，读到的还会是少了最后几条的那份。
         const seed = forkSeed(liveParent?.snapshotEvents() ?? stored?.events ?? [], forkPoint)
 
-        const selection = initialSelection(provider, model)
         // **`agents.create` 而不是 `ctx.sessions.fork`。** 后者看起来更贴切，但它
         // 造的是一个**没有 agent 的裸会话**（内部也就是 `sessions.create(childId,
         // {seed, meta})`），而 ACP 侧的会话必须有 agent 才能收 prompt，且上游没有
@@ -873,12 +860,12 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             ...(provider !== undefined ? { provider } : {}),
             ...(model !== undefined ? { model } : {}),
           },
-          setup: setupSession(parentCwd, mcpServers, selection, readDelegate),
+          setup: setupSession(parentCwd, mcpServers, readDelegate),
         })
         return {
           agent: handle.agent,
           dispose: () => handle.dispose(),
-          controls: controlsFor(handle.agent, selection),
+          controls: controlsFor(handle.agent),
           cwd: handle.agent.session.header.cwd,
         }
       },

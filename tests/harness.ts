@@ -44,6 +44,7 @@ import SpillStore from '@deepseek-ai/dsh-spill'
 import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import type {
   ElicitationSchema,
@@ -352,6 +353,8 @@ export async function createHarness(
     WorkingDirectory,
     LlmService,
     ToolRegistry,
+    // 与 `composeAgent` 同一个执行器：没有它，每一步都在装配提示词时失败。
+    NativeToolExecutor,
     SessionProjections,
     AgentRegistry,
     AgentLoop,

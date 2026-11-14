@@ -18,7 +18,10 @@ and can be configured as shown below, but has not yet been validated feature by 
 
 ## DSH 0.2 compatibility
 
-This branch pins every DSH package to **0.2.1-rc.2** and requires **Node 22.19.0 or later**.
+This branch pins every DSH package to **0.2.2-rc.3** and requires **Node 22.19.0 or later**.
+Upstream DSH itself has required Node 24.9 since 0.2.1-alpha.4; the extra floor comes from parts
+this adapter does not load (the OAR subagent library and the CLI scripts). This project keeps Node 22
+in its CI matrix, so a DSH upgrade that breaks Node 22 fails here first.
 It still assembles DSH inside the ACP process; it does not launch the official desktop runtime.
 New sessions use the native v4 log. The upstream persistence backend can restore supported v3
 logs and publishes a v4 successor while retaining the original v3 bytes. Migration support is
@@ -133,8 +136,8 @@ or rewrite its arguments. The model retains control, so legitimate repeated call
 **Instruction files and skills.** In every directory from the project root (the nearest `.git`)
 down to the session cwd, `AGENTS.md`, `CLAUDE.md`, and their `.local.md` overlays are loaded into
 the model context. Two user-wide files are added too: `$DSH_HOME/AGENTS.md` (`~/.dsh/AGENTS.md`)
-and, **new in DSH 0.2**, `$DSH_AGENTS_HOME/AGENTS.md` (`~/.agents/AGENTS.md` by default). The total is
-capped at 40,000 bytes. Skills are discovered under `<project>/.dsh/skills`,
+and, **new in DSH 0.2**, `$DSH_AGENTS_HOME/AGENTS.md` (`~/.agents/AGENTS.md` by default). Project
+files and user-wide files each have their own 40,000-byte cap, so one cannot crowd out the other. Skills are discovered under `<project>/.dsh/skills`,
 `<project>/.agents/skills`, `$DSH_HOME/skills`, and `$DSH_AGENTS_HOME/skills`; adding or editing a
 skill takes effect without reconnecting.
 
@@ -264,7 +267,8 @@ Enter the key in the **DeepSeek Harness Configuration** panel on the same page:
 
 **Save DeepSeek Configuration** affects only **new** sessions. Reconnect any running session to
 apply changes. The model and reasoning level are not configured in this panel; they are
-session-level selectors available from the input box.
+session-level selectors available from the input box, and they are saved with the session: reopening
+a session keeps its last model and reasoning level instead of reverting to the defaults.
 
 Older codeg versions without the built-in entry can still use **Settings > Agents > Add Custom
 Agent > Manual Configuration**. Set the registry ID to `deepseek-acp`, the distribution information

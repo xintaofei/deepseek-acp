@@ -22,6 +22,14 @@ import { DEEPSEEK_MODELS, DEFAULT_MODEL, DEFAULT_PROVIDER } from '../src/launche
 const RETIRED = ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']
 
 /**
+ * 一个不是官方源的 Messages 根。DSH 0.2.2 起，内置目录配官方源时适配器会去拉
+ * `/models` 列表——用例里那是一次真实的外网请求（假 key 换来一个 401，再退回内置
+ * 目录）。换成别的源就不跟列表，解析出的模型信息与内置目录一致，且一个包都不发。
+ * 两支都用它：哪天我们的目录恰好等于内置目录，`ours` 那支也不会偷偷联网。
+ */
+const OFFLINE_BASE_URL = 'https://catalog-fixture.invalid/anthropic'
+
+/**
  * 只挂 LLM 那两层的最小组合。
  *
  * 不用 `composeAgent`：它刻意不含 provider 适配器（那是部署配置而非 agent
@@ -38,7 +46,11 @@ async function llmOnly(catalog: 'ours' | 'upstream' = 'ours'): Promise<Context> 
     { source: 'process', values: { DEEPSEEK_API_KEY: 'sk-offline-catalog-fixture' } },
   ]))
   await ctx.plugin(LlmService)
-  await ctx.plugin(LlmDeepSeek, { reasoningEffort: 'high', ...(catalog === 'ours' ? { models: DEEPSEEK_MODELS } : {}) })
+  await ctx.plugin(LlmDeepSeek, {
+    reasoningEffort: 'high',
+    baseURL: OFFLINE_BASE_URL,
+    ...(catalog === 'ours' ? { models: DEEPSEEK_MODELS } : {}),
+  })
   return ctx
 }
 
@@ -74,13 +86,13 @@ describe('TC-MODEL-02 适配器真的消化得了这份目录', () => {
     expect(models.map((m) => m.id)).toEqual(DEEPSEEK_MODELS.map((m) => m.id))
   })
 
-  it('默认模型解析出的上下文窗口是 1M —— 用量进度条的分母', async () => {
+  it('默认模型解析出的上下文窗口是 1,048,576 —— 用量进度条的分母', async () => {
     // 分母错了不会报错，只会画出一根刻度错误的进度条，而那比没有进度条更坏。
-    // 1M 是定价页写的值，也是适配器的 `defaultContextWindow`；两者一致，因此
-    // 目录里省略 `contextWindow` 是安全的——这条用例守的就是这个「一致」。
+    // 这是官方 `/models` 列表声明的值（2^20）。定价页写的「1M」是取整，而适配器在
+    // 条目缺省时回落的是十进制 1,000,000——所以目录里必须显式写，这条守的就是它没被省掉。
     const ctx = await llmOnly()
     const info = await ctx.llm.resolveModelInfo(DEFAULT_PROVIDER, DEFAULT_MODEL)
-    expect(info.context?.contextWindow).toBe(1_000_000)
+    expect(info.context?.contextWindow).toBe(1_048_576)
   })
 
   it('默认模型报告的输入模态含 image —— 图片准入读的就是它', async () => {

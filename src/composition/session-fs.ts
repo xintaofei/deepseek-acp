@@ -28,10 +28,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { FileSystem } from '@deepseek-ai/dsh-fs'
 import type {
+  FsDeleteOutcome,
   FsDirEntry,
   FsEditOutcome,
   FsEditRequest,
   FsInfo,
+  FsMoveOutcome,
   FsPathInfo,
   FsTarget,
   FsVersion,
@@ -39,6 +41,14 @@ import type {
   FsWriteOutcome,
 } from '@deepseek-ai/dsh-fs'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
+
+/**
+ * `patchText` 收的补丁块。类型定义在 `dsh-fs-patch` 里，那是 `dsh-fs` 的传递依赖，
+ * 不是我们的直接依赖；从抽象类的签名上取，不必为一个类型名多钉一个包。
+ */
+type PatchHunks = Parameters<FileSystem['patchText']>[1]
+/** `moveFile` 的补丁与两端版本守卫，取法同上。 */
+type MoveOptions = Parameters<FileSystem['moveFile']>[2]
 
 /**
  * 向编辑器取一份文本。
@@ -224,6 +234,40 @@ export class DelegatedReadFileSystem extends FileSystem {
     sandboxPolicy?: SandboxExecutionPolicy,
   ): Promise<FsEditOutcome> {
     return this.baseFs.editText(target, edit, expected, signal, sandboxPolicy)
+  }
+
+  /**
+   * DSH 0.2.2 新增的三个写方法（`apply_patch` 走它们），与上面的写一样原样转发：
+   * 补丁的字面匹配同样是后端的临界区，删除与移动同样要经过沙箱围栏与那把
+   * per-targetKey 的写锁。
+   */
+  patchText(
+    target: FsTarget,
+    hunks: PatchHunks,
+    expected?: { version: FsVersion },
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsEditOutcome> {
+    return this.baseFs.patchText(target, hunks, expected, signal, sandboxPolicy)
+  }
+
+  deleteFile(
+    target: FsTarget,
+    expected?: { version: FsVersion },
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsDeleteOutcome> {
+    return this.baseFs.deleteFile(target, expected, signal, sandboxPolicy)
+  }
+
+  moveFile(
+    source: FsTarget,
+    destination: FsTarget,
+    options: MoveOptions,
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsMoveOutcome> {
+    return this.baseFs.moveFile(source, destination, options, signal, sandboxPolicy)
   }
 }
 
