@@ -123,7 +123,8 @@
     "@deepseek-ai/dsh-util-values": "0.2.1-rc.2",
     "@deepseek-ai/dsh-working-directory": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "3.18.5",
-    "yaml": "2.8.1"
+    "yaml": "2.8.1",
+    "zod": "4.4.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.5",

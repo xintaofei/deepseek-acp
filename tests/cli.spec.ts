@@ -4,6 +4,8 @@
  * 分两层：`parseCli` / `readSecret` 是纯函数与纯流处理，进程内直接测；写盘那条必须
  * 起**真实子进程**——`--setup` 的契约是「退出码 0 即登录成功」，而退出码只有真进程
  * 才有。凭据落点由 `DSH_HOME` 指到临时目录，绝不碰开发者自己的 `~/.dsh`。
+ *
+ * 另有一组进程内用例守着「凭据文件压住客户端传入的 key」时的那行提示（TC-CLI-04）。
  */
 
 import { spawn } from 'node:child_process'
@@ -12,10 +14,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
+import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { afterEach, describe, expect, it } from 'vitest'
+import { shadowedApiKeyNotice } from '../src/launcher/boot.js'
 import { AGENT_INFO } from '../src/protocol/initialize.js'
 import { parseCli } from '../src/launcher/cli.js'
-import { readSecret } from '../src/launcher/setup.js'
+import { CREDENTIAL_REF, readSecret } from '../src/launcher/setup.js'
+import { realTempDir } from './temp-dir.js'
 
 const BIN = fileURLToPath(new URL('../lib/bin.js', import.meta.url))
 
@@ -157,4 +164,53 @@ describe('TC-CLI-03 --setup 写盘（子进程）', () => {
     expect(run.code).not.toBe(0)
     expect(() => readFileSync(join(home as string, '.credentials.yaml'), 'utf8')).toThrow()
   }, 30_000)
+})
+
+describe('TC-CLI-04 凭据文件压住客户端的 key 时提示一行', () => {
+  // DSH 0.2 起 `$DSH_HOME/.credentials.yaml` 压过进程环境变量，0.1.x 相反。跑过
+  // `--setup` 再在编辑器里经 `env` 换 key 的用户会静默用旧 key，这一行是唯一的线索。
+
+  /** 一个只挂凭据服务的组合：文件里存 `stored`，进程环境里放 `inherited`。 */
+  async function credentialsOnly(stored: string | undefined, inherited: string | undefined): Promise<Context> {
+    const ctx = new Context()
+    ctx.provide('launchEnvironment', createLaunchEnvironmentSnapshot([
+      { source: 'process', values: inherited === undefined ? {} : { DEEPSEEK_API_KEY: inherited } },
+    ]))
+    await ctx.plugin(LocalCredentials, { dshHome: realTempDir('dsacp-cred-'), watch: false })
+    if (stored !== undefined) await ctx.credentials.set(CREDENTIAL_REF, stored)
+    return ctx
+  }
+
+  it('两处不一致：说清用的是文件里的、怎么改，但两边的值都不出现', async () => {
+    const ctx = await credentialsOnly('sk-stored-111', 'sk-client-222')
+    const notice = await shadowedApiKeyNotice(ctx, '/somewhere/.credentials.yaml')
+    expect(notice).toContain('DEEPSEEK_API_KEY')
+    expect(notice).toContain('/somewhere/.credentials.yaml')
+    expect(notice).toContain('--setup')
+    // 提示进 stderr，而编辑器会把 agent 的 stderr 原样收进日志面板：值或片段一个都不能漏。
+    for (const secret of ['sk-stored-111', 'sk-client-222', 'stored-111', 'client-222']) {
+      expect(notice).not.toContain(secret)
+    }
+    await ctx.fiber.dispose()
+  })
+
+  it('同一个 key 放了两处、只有一处、或一处都没有 —— 都不提示', async () => {
+    for (const [stored, inherited] of [
+      ['sk-same', 'sk-same'],
+      ['sk-stored', undefined],
+      [undefined, 'sk-client'],
+      [undefined, undefined],
+    ] as const) {
+      const ctx = await credentialsOnly(stored, inherited)
+      expect(await shadowedApiKeyNotice(ctx), `stored=${stored} inherited=${inherited}`).toBeUndefined()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('环境变量是空串 —— 等于没给，不提示', async () => {
+    // 编辑器的配置面板里清空一个字段，多半是传一个空串而不是不传。
+    const ctx = await credentialsOnly('sk-stored', '')
+    expect(await shadowedApiKeyNotice(ctx)).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
 })

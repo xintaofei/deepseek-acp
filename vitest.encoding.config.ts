@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config'
+import { isolatedHomes } from './tests/isolated-homes.js'
 
 /**
  * `tests/pwsh-encoding.spec.ts` 专用：**单 worker 跑这一个文件**。
@@ -23,5 +24,7 @@ export default defineConfig({
     // 些用例要起真的 ACL runner 与 PowerShell 进程。
     testTimeout: 20_000,
     hookTimeout: 20_000,
+    // 与主配置同一个理由，见 `tests/isolated-homes.ts`。
+    env: isolatedHomes(),
   },
 })

@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Logger, type Exporter } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
@@ -21,6 +21,7 @@ import * as ImageOffload from '@deepseek-ai/dsh-compaction-image-offload'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import LlmService from '@deepseek-ai/dsh-llm'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import type { DeepSeekCatalogModel } from '@deepseek-ai/dsh-llm-deepseek'
@@ -53,6 +54,7 @@ import { SessionListIndex } from '../session/list-index.js'
 import { ensurePiAi } from '../composition/pi-ai.js'
 import { mountNativeShell } from '../composition/shell.js'
 import * as acpBridge from '../index.js'
+import { CREDENTIAL_REF } from './setup.js'
 import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
 
 /**
@@ -136,30 +138,32 @@ export const DEFAULT_PROVIDER = 'deepseek-official'
 /**
  * 默认模型：DeepSeek-V4.1-Flash。
  *
- * 官方定价页给它的定位是「各项指标全面超越 V4 Pro」，且更快更便宜——编辑器里
- * 的默认档没有理由是别的。它同时**收图片**，这一条把原先「默认模型不收图、发图
- * 要先去选择器换成 vision 模型」那条绕路整个消掉了。
+ * 按官方定价页，它比 V4 Pro 便宜得多（输出单价约为它的三分之一）、并发上限是它的五倍，
+ * 而且**收图片**——V4 Pro 不收。编辑器里的默认档因此是它：用户第一次把截图拖进
+ * 来就能用，不必先去选择器里换模型。
  */
 export const DEFAULT_MODEL = 'deepseek-flash'
 
 /**
  * 本部署 advertise 的 DeepSeek 模型目录。
  *
- * **为什么要覆盖而不是吃适配器的默认**：`dsh-llm-deepseek` 的内置目录里仍留着
- * `deepseek-v4-flash` 与 `deepseek-v4-flash-vision-exp` 两个**已下线**的 id。
- * 它们还能调通（官方把请求转给 V4.1 Flash 并按 Flash 计费），但摆进模型选择器
- * 是两重误导：用户以为自己在选一个不同的模型，而目录里 `deepseek-v4-flash` 声明
- * 的是**纯文本**——于是在一个实际收图的后端上，我们会拿着过时的目录去拒绝用户
- * 的图片，还劝他换成另一个同样已下线的 id。
+ * ## 为什么还要覆盖
  *
- * 因此这里只列官方定价页上还活着的两条。目录是**建议性**的：它决定选择器里有
- * 什么、以及图片准入怎么判，不限制 `DEEPSEEK_ACP_MODEL` 能填什么——要用某个
- * 老 id 或内部灰度模型，环境变量照样直通。
+ * 最初覆盖是因为上游内置目录里留着两个已下线的 id。DSH 0.2 起上游目录与这里
+ * 列的是同样两条，留着覆盖只为一件事：**选择器里的说明是中文**，与适配器其余
+ * 面向用户的文字一致（上游给 Flash 没写说明，给 Pro 的是英文）。
  *
- * 未列出的字段一律吃适配器默认，与它自己那份条目逐字一致：`contextWindow` 回落
- * 到 `defaultContextWindow`（1M，与定价页相同），图片预算回落到 640k 像素 / 1MiB。
- * `maxTokens` 同样不动——定价页写的 384K 是**上限**，而适配器选的 256K 已经远超
- * 一次编码回答的量级，把上限拉满只会抬高单轮的最坏成本。
+ * 代价是目录会漂移：上游给条目加了字段，这里不照抄就**静默**丢掉，不报任何错。
+ * 0.2 加的 `toolUpdate` 就这样丢过一次。所以 TC-MODEL-03 拿上游自带目录逐条对比
+ * 除展示文字外的每个字段，上游一动用例就红——到那时要么照抄，要么干脆删掉覆盖。
+ *
+ * 目录是**建议性**的：它决定选择器里有什么、以及图片准入怎么判，不限制
+ * `DEEPSEEK_ACP_MODEL` 能填什么——要用某个老 id 或内部灰度模型，环境变量照样直通。
+ *
+ * 未列出的字段吃适配器默认：`contextWindow` 回落到 `defaultContextWindow`（1M，
+ * 与定价页相同），图片预算回落到适配器的默认值。`maxTokens` 同样不动——定价页写的
+ * 384K 是**上限**，而适配器选的 256K 已经远超一次编码回答的量级，把上限拉满只会
+ * 抬高单轮的最坏成本。
  *
  * @see https://api-docs.deepseek.com/zh-cn/quick_start/pricing
  */
@@ -167,12 +171,17 @@ export const DEEPSEEK_MODELS: DeepSeekCatalogModel[] = [
   {
     id: DEFAULT_MODEL,
     name: 'DeepSeek-V4.1-Flash',
-    description: '更快更省，且在各项指标上超越 V4 Pro；支持图像理解。日常编码的默认档。',
+    description: '更快更省，支持图像理解。日常编码的默认档。',
     inputModalities: ['text', 'image'],
-    // 上游给这条路由标的就是 `in-history`（系统提示随历史更新而不是每次整段
-    // 重发）。覆盖目录时漏掉它不会报错，只会让这个模型**静默**退回另一种系统
-    // 提示投递方式——所以照抄，不省。
+    // 下面两项是**提示缓存**的开关，漏掉都不报错，只会让 KV cache 命中率静默下降，
+    // 所以照抄上游，不省。
+    //
+    // `in-history`：系统提示变了，把变化作为一条历史消息追加，而不是改写请求开头。
     systemPromptUpdate: 'in-history',
+    // `addition-only`：会话中途工具变了（MCP 服务器晚连上、技能目录变了），新工具
+    // 作为历史里的一次「新增」声明，不改动已缓存的前缀。没有它，agent loop 每遇到
+    // 一次工具表变化就从头开一段新请求，整段前缀的缓存全部作废。
+    toolUpdate: 'addition-only',
   },
   {
     id: 'deepseek-v4-pro',
@@ -180,10 +189,9 @@ export const DEEPSEEK_MODELS: DeepSeekCatalogModel[] = [
     // 选择器里显示的是「选哪个模型」，而 `0813` 是同一个模型的哪一版快照——
     // id 不带它，官方也随时可能把它指向新快照。上游自带目录的写法同此。
     name: 'DeepSeek-V4-Pro',
-    // 留着它是因为**此刻它还在**，而不是因为它更强。官方已宣布有序下线：
-    // 2026-09-14 12:00（北京时间）起，在 V4.1 Pro 发布之前，这个 id 的请求会
-    // 全部路由到 V4.1 Flash 并按 Flash 计费。到那天之后它就该从这份目录里去掉。
-    description: '旧的高价档，官方已宣布有序下线；除非有特定理由，优先用 Flash。',
+    // 0.9.0 写的是「官方已宣布有序下线」。2026-11 的定价页已没有这句话，它照常在售，
+    // 所以只写能从定价页核实的差别：更贵、不收图。「适合复杂任务」是上游目录的说法。
+    description: '价格更高，不支持图像理解；上游建议用于复杂或对质量要求高的任务。',
   },
 ]
 
@@ -330,7 +338,12 @@ export async function composeAgent(
   //
   // 它经 `ctx.fs` 读盘，而我们挂的是 `SandboxedFileSystem`。不受影响：那一层
   // 只对 `write` / `edit` 两个变更加围栏，读在任何模式下都直通。
-  await ctx.plugin(SkillFilesystem, { watch: false })
+  //
+  // **watch 保持默认的开启**：会话中途往技能目录里加一个技能、或改了它的描述，
+  // 斜杠补全与模型看到的目录随即更新，不必重连。凭据那边关 watch 的理由（watcher
+  // 拖住事件循环、进程断连后不退）在这里不成立：插件 teardown 时会关掉自己的
+  // watcher。TC-GUARD-02 守着「断连即退出」，TC-COMP-07 守着热加载本身。
+  await ctx.plugin(SkillFilesystem, {})
   // 模型侧：注册 `skill` 工具，并在每个步骤前把目录作为持久 `<system-reminder>`
   // 注入。**注入的目录与技能正文都不会漏给客户端**——它们落在会话日志里的
   // source kind 是 `skill-catalog` / `skill-invocation`，而 `mapEvent` 对
@@ -399,18 +412,6 @@ export async function composeAgent(
 }
 
 /**
- * 引导内置组合并挂上 bridge。
- *
- * API Key 走 `DEEPSEEK_API_KEY`（可用 `llm-deepseek` 配置改名）。挂上本地凭据
- * provider 是为编辑器场景准备的：GUI 应用不继承登录 shell 的环境变量，`.zshrc`
- * 里的 export 到不了子进程。有了它，key 可以放在 `~/.dsh/.credentials.yaml`，
- * 与启动方式无关。缺失时不在启动期报错，而是在第一个回合以 `MISSING_CREDENTIAL`
- * 失败——适配器每次请求重新解析，改完无需重启。
- * @param env - 进程环境
- * @param onClosed - 连接关闭且 teardown 结束后调用；CLI 传退出进程
- * @returns 已引导的根 context
- */
-/**
  * 把 cordis 的日志接到 **stderr** 上。
  *
  * 没有这个 exporter，`ctx.logger` 的每一条记录都不会去到任何地方——bridge 里所有
@@ -425,7 +426,7 @@ export async function composeAgent(
  * @param ctx - 根 context
  */
 export function installStderrLog(ctx: Context): void {
-  ctx.logger.exporter({
+  const exporter: Exporter = {
     // 颜色交给终端：编辑器多半把 agent 的 stderr 原样收进日志面板，ANSI 码在
     // 那里是噪声。
     colors: false,
@@ -435,13 +436,67 @@ export function installStderrLog(ctx: Context): void {
     // 装了 exporter 但不放等级，它们照样落空，而且看起来像是已经接好了。
     // 不放到 3：`debug` 是给排查开的，默认吐出来只会淹没真正的线索。
     levels: { default: 2 },
+    // **经 `Logger.format` 展开**，不要自己把参数拼起来。上游的告警几乎都是
+    // printf 风格（`warn('watcher error on %s', path)`）：原样拼接会印出字面的 `%s`、
+    // 再把参数接在句末；`Error` 参数经 `JSON.stringify` 只剩 `{}`，堆栈整个丢掉。
+    // 0.9.0 一直是这样错着的。
     export(message) {
-      const parts = message.args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
-      process.stderr.write(`[${message.type}] ${message.name}: ${parts.join(' ')}\n`)
+      process.stderr.write(`[${message.type}] ${message.name}: ${Logger.format(exporter, message)}\n`)
     },
-  })
+  }
+  ctx.logger.exporter(exporter)
 }
 
+/**
+ * 凭据文件压住了客户端传进来的另一个 key 时，`boot()` 在 stderr 提示的那一行。
+ *
+ * DSH 0.2 把优先级倒了过来：`$DSH_HOME/.credentials.yaml` 里存着的 key 压过进程
+ * 环境变量（0.1.x 是环境变量赢）。跑过 `--setup`、之后又在编辑器配置里经 `env`
+ * 换 key 的用户，升级后会**静默**继续用文件里的旧 key——请求照样成功，只是用的是
+ * 另一把 key、记在另一个账号上，没有任何报错能让人察觉。
+ *
+ * 只说「两处不一致、用的是哪一处」，任何一边的值、哪怕片段都不进提示。两边相同时
+ * 不提示：那只是同一个 key 放了两处，没有歧义。
+ * @param ctx - 已挂好凭据服务的根 context
+ * @param file - 凭据文件路径，只用于提示文字
+ * @returns 提示文字；没有被压住的 key 时 undefined
+ */
+export async function shadowedApiKeyNotice(
+  ctx: Context,
+  file = join(resolveDshHome(), '.credentials.yaml'),
+): Promise<string | undefined> {
+  const credentials = ctx.get('credentials')
+  if (credentials === undefined) return undefined
+  const stored = await credentials.resolve(CREDENTIAL_REF)
+  if (stored?.source !== 'file') return undefined
+  // 与凭据 provider 读的是同一层（`process`），而不是 `boot()` 收到的 `env`：要比的
+  // 是「它实际看到、却被文件压住的那个值」。
+  const inherited = launchEnvironmentOf(ctx).getFrom(CREDENTIAL_REF, ['process'])?.value
+  if (inherited === undefined || inherited.length === 0 || inherited === stored.value) return undefined
+  return `${CREDENTIAL_REF} from the client environment is ignored: ${file} stores a different key, `
+    + 'and since DSH 0.2 the stored key wins. Run `deepseek-acp --setup` to replace it, '
+    + 'or delete that entry to use the environment variable.'
+}
+
+/**
+ * 引导内置组合并挂上 bridge。
+ *
+ * API Key 的引用名是 `DEEPSEEK_API_KEY`。挂上本地凭据 provider 是为编辑器场景准备
+ * 的：GUI 应用不继承登录 shell 的环境变量，`.zshrc` 里的 export 到不了子进程。有了
+ * 它，key 可以放在 `$DSH_HOME/.credentials.yaml`（`--setup` 写的就是这里），与启动
+ * 方式无关。
+ *
+ * **DSH 0.2 起凭据文件压过环境变量**，两处都有时用文件里的，不一致时由
+ * {@link shadowedApiKeyNotice} 提示。`.env` 文件不读：上游那两层要宿主提供启动环境
+ * 快照（`launchEnvironment`），我们没有提供，0.9.0 也一样。
+ *
+ * 缺 key 时不在启动期报错，而是在第一个回合以 `MISSING_CREDENTIAL` 失败。凭据文件
+ * 只在启动时读一次（watch 关着，见下）：`--setup` 写完后客户端会重连，新进程读到
+ * 新 key。
+ * @param env - 进程环境
+ * @param onClosed - 连接关闭且 teardown 结束后调用；CLI 传退出进程
+ * @returns 已引导的根 context
+ */
 export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promise<Context> {
   const ctx = new Context()
   installStderrLog(ctx)
@@ -471,14 +526,15 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   // 明文，而不是一条要读两个包才推得出来的默认值链——这个默认值直接决定每次
   // 请求的延迟与 token 开销，不该藏着。
   //
-  // 模型目录同样显式给出——理由见 {@link DEEPSEEK_MODELS}：适配器自带的那份还
-  // 留着两个已下线的 id，其中一个还声明成纯文本，会让我们在一个实际收图的后端
-  // 上拒掉用户的图片。
+  // 模型目录同样显式给出，理由与它的漂移风险见 {@link DEEPSEEK_MODELS}。
   await ctx.plugin(LlmDeepSeek, { reasoningEffort: 'high', models: DEEPSEEK_MODELS })
+  const shadowed = await shadowedApiKeyNotice(ctx)
+  if (shadowed !== undefined) ctx.logger('credentials').warn('%s', shadowed)
   // ── 用户设置文档：多 provider 的配置面 ────────────────────────────────
   //
-  // DSH 0.2's settings forms belong to native profiles. ACP retains its
-  // document without mounting a native profile or mutating a desktop one.
+  // DSH 0.2 的设置表单属于上游的 profile，我们不起 profile，也不去改桌面端的
+  // profile，而是自己保管一份文档（理由见 `src/composition/settings.ts`）。Loader
+  // 在这里只是 pi-ai 的挂载器：它的 Config 校验与热更新都要经 Loader 的条目来做。
   await ctx.plugin(Loader, { baseUrl: import.meta.url })
   await ctx.plugin(AcpSettings, {})
   // 通用多 provider 适配器：openai / anthropic / azure / vertex / bedrock 走

@@ -7,7 +7,7 @@
  */
 
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Logger, type Exporter } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import {
   PROTOCOL_VERSION,
@@ -304,7 +304,10 @@ export async function createHarness(
      * 一个忘了隔离的用例会去改本机真正的 `~/.dsh/.credentials.yaml`。
      */
     settings?: string
-    /** Explicit inherited environment layer; useful for host-independent credential tests. */
+    /**
+     * 显式给出「继承的进程环境」那一层（`launchEnvironment` 的 `process` 来源）。
+     * 凭据相关的用例靠它摆脱开发机上真实的 `DEEPSEEK_API_KEY`。
+     */
     launchEnvironment?: Readonly<Record<string, string>>
     /**
      * 挂附件服务（图片输入，US-23），对象库**关进这个目录**。
@@ -329,19 +332,17 @@ export async function createHarness(
   //
   // 不往 stderr 打：`boot.ts` 里那条注释是对的，每个用例都吐一遍日志会淹掉真正的
   // 失败输出。收进数组，谁需要谁去读（`h.logs`）；真出事时由用例自己打出来。
-  ctx.logger.exporter({
+  const exporter: Exporter = {
     colors: false,
     // 不写 `levels` 时生效等级是 1，`warn`(2) 与 `debug`(3) 会被静默丢掉——而
     // 上游报告后台失败用的正是 `warn`。用例里全都收下，判断交给用例自己。
     levels: { default: 3 },
-    export(message: { type: string; name: string; args: unknown[] }) {
-      logs.push({
-        type: message.type,
-        name: message.name,
-        text: message.args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '),
-      })
+    // 与 `installStderrLog` 同一种展开方式：用例断言的文字要和生产里印出来的一样。
+    export(message) {
+      logs.push({ type: message.type, name: message.name, text: Logger.format(exporter, message) })
     },
-  })
+  }
+  ctx.logger.exporter(exporter)
   // `SessionProjections` 在这份基础组合里不再可选：`AgentLoop` 现在 inject 它
   // （回合边界投影归它注册）。缺席时 loop 不会启动、也不报错——`session/new`
   // 会以「no agent factory registered」失败，而那条信息读起来像是漏挂了 loop。

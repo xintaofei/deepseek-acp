@@ -130,6 +130,18 @@ but without progress updates.
 agent injects an escalation prompt. It does not add anything to the tool catalog, reject the call,
 or rewrite its arguments. The model retains control, so legitimate repeated calls continue to work.
 
+**Instruction files and skills.** In every directory from the project root (the nearest `.git`)
+down to the session cwd, `AGENTS.md`, `CLAUDE.md`, and their `.local.md` overlays are loaded into
+the model context. Two user-wide files are added too: `$DSH_HOME/AGENTS.md` (`~/.dsh/AGENTS.md`)
+and, **new in DSH 0.2**, `$DSH_AGENTS_HOME/AGENTS.md` (`~/.agents/AGENTS.md` by default). The total is
+capped at 40,000 bytes. Skills are discovered under `<project>/.dsh/skills`,
+`<project>/.agents/skills`, `$DSH_HOME/skills`, and `$DSH_AGENTS_HOME/skills`; adding or editing a
+skill takes effect without reconnecting.
+
+**`~/.agents` is shared with other agent tools.** Whatever another tool, or a script you ran, puts in
+`~/.agents/AGENTS.md` or `~/.agents/skills` also reaches DeepSeek's context. Check what is there, or
+set `DSH_AGENTS_HOME` in the client's environment configuration to a directory you control.
+
 **Image input.** Paste or drag images into the editor. Text and images enter the model in their
 original interleaved order, so `before [image] after [image]` does not become
 `before after [image] [image]`. Image bytes are stored in a content-addressed store under
@@ -172,7 +184,8 @@ There are two ways to provide an API key; choose one:
 
 - **`deepseek-acp --setup`**: paste the key once in an interactive prompt. It is stored in
   `$DSH_HOME/.credentials.yaml` with mode `0600`. See [Login](#login) below.
-- **Client environment variables**: both configurations below show where to set one.
+- **Client environment variables**: both configurations below show where to set one. If a key is
+  already stored through `--setup`, the stored key is used instead.
 
 **Do not rely on `export` in `.zshrc`.** GUI editors do not inherit the login shell environment,
 and neither do the child processes they spawn. This is why `--setup` stores credentials in a file
@@ -202,10 +215,13 @@ same command manually:
 deepseek-acp --setup      # Paste the key and press Enter. Terminal input is hidden.
 ```
 
-The stored credential key is `DEEPSEEK_API_KEY`, written to `$DSH_HOME/.credentials.yaml`. This
-source takes precedence over the two `.env` layers, so an old key left in `.env` cannot override it.
-An environment variable explicitly passed to the process still has the highest priority, because
-it represents the intent for that particular run.
+The stored credential key is `DEEPSEEK_API_KEY`, written to `$DSH_HOME/.credentials.yaml`.
+**Since DSH 0.2 the stored key wins over the environment**, including a `DEEPSEEK_API_KEY` that the
+editor passes to the agent (0.9.0 and earlier did the opposite). After running `--setup`, changing
+the key in the editor configuration has no effect; run `--setup` again instead, or delete the
+`DEEPSEEK_API_KEY` entry from that file to go back to the environment variable. When both are set
+and differ, the agent writes one line to stderr at startup saying which one it uses; neither value
+is printed. `.env` files are not read.
 
 Advertising this method does **not** block session creation. This project never returns
 `auth_required`; without a key, the first turn still fails with `MISSING_CREDENTIAL`. Terminal Auth
@@ -244,7 +260,7 @@ Enter the key in the **DeepSeek Harness Configuration** panel on the same page:
 | Field | Description |
 |---|---|
 | API endpoint | Leave empty to use the official endpoint |
-| API key | Passed to the agent as `DEEPSEEK_API_KEY`; **leave empty after using `--setup`**, because environment variables override the credential file |
+| API key | Passed to the agent as `DEEPSEEK_API_KEY`; **ignored once you have used `--setup`**, because the credential file wins (since DSH 0.2) |
 
 **Save DeepSeek Configuration** affects only **new** sessions. Reconnect any running session to
 apply changes. The model and reasoning level are not configured in this panel; they are

@@ -11,17 +11,19 @@
  * 起不来，静默降级成无约束执行才是坏结果。
  */
 
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { resolveAgentsHome, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { EXIT_PLAN_MODE } from '@deepseek-ai/dsh-plan-mode'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
 import { PLAN_SECTION, composeAgent, installStderrLog } from '../src/launcher/boot.js'
 import { createInProcessPort } from '../src/port/in-process.js'
 import { waitFor } from './harness.js'
+import { realTempDir } from './temp-dir.js'
 import { NATIVE_SHELL_TOOL } from './native-shell.js'
 import { nativeShellToolName } from '../src/composition/shell.js'
 
@@ -32,6 +34,12 @@ import { nativeShellToolName } from '../src/composition/shell.js'
  * 共用没有串扰风险。Cordis 4 的根 context 没有对外的整体 teardown，进程随
  * vitest 一起结束即可。
  */
+/** 往技能根里写一个最小的技能。 */
+function writeSkill(root: string, name: string): void {
+  mkdirSync(join(root, name), { recursive: true })
+  writeFileSync(join(root, name, 'SKILL.md'), `---\nname: ${name}\ndescription: ${name} skill\n---\n\nbody\n`)
+}
+
 let shared: Promise<Context> | undefined
 function composed(): Promise<Context> {
   shared ??= (async () => {
@@ -155,10 +163,45 @@ describe('TC-COMP-07 技能栈（US-27）', () => {
     expect(skills).toBeDefined()
     const summaries = await skills!.list({ cwd: tmpdir() })
     expect(summaries.map((s) => s.name)).not.toContain('dsh')
-    // DSH 0.2 also discovers launch-configured bundled roots; that does not
-    // mean the separate dsh-skill-badge plugin is composed.
+    // DSH 0.2 还会发现启动配置里声明的 bundled 根；那不等于单独的 `dsh-skill-badge`
+    // 插件被挂上了，所以这里专门再断一次 bundled 来源的 `dsh`。
     expect(summaries.some((s) => s.name === 'dsh' && s.source === 'bundled')).toBe(false)
   }, 30_000)
+
+  it('技能目录热加载：会话中途新加的技能不用重连就进目录', async () => {
+    // PR #9 曾把 watch 关掉，于是新加的技能要等下一次连接才看得到。bridge 靠
+    // `skills/change` 刷新斜杠补全，所以这里断的是这条事件真的来了，而不只是再列一次
+    // 能列出来——不开 watch 时手动再列一次也可能列得出来，但没人会去列。
+    const ctx = await composed()
+    const skills = ctx.get('skills')!
+    const cwd = realTempDir('dsacp-comp-skills-')
+    mkdirSync(join(cwd, '.git'))
+    writeSkill(join(cwd, '.dsh', 'skills'), 'first')
+    // 先列一次：watcher 是按列过的根建立的。
+    expect((await skills.list({ cwd })).map((s) => s.name)).toContain('first')
+
+    let changed = 0
+    const off = ctx.on('skills/change', () => {
+      changed += 1
+    })
+    try {
+      writeSkill(join(cwd, '.dsh', 'skills'), 'added-later')
+      await waitFor(() => changed > 0, 10_000, 'skills/change after adding a skill')
+      expect((await skills.list({ cwd })).map((s) => s.name)).toContain('added-later')
+    } finally {
+      off()
+    }
+  }, 30_000)
+})
+
+describe('TC-COMP-08 用例不读本机的家目录', () => {
+  it('DSH_HOME 与 DSH_AGENTS_HOME 都指向临时目录 —— 组合按生产默认值解析的路径落不到 ~/.dsh、~/.agents', () => {
+    // `composeAgent` 挂的指令加载与技能提供方都按这两个变量找全局目录；`~/.agents` 是与
+    // 其它 agent 工具共用的，开发机上多半有东西。注入在 vitest 配置里（tests/isolated-homes.ts），
+    // 漏掉那一行，这条先红。
+    expect(resolveDshHome()).toContain('dsacp-test-home-')
+    expect(resolveAgentsHome()).toContain('dsacp-test-home-')
+  })
 })
 
 describe('TC-COMP-05 文件工具在沙箱之下', () => {
@@ -251,5 +294,24 @@ describe('TC-COMP-06 stderr 日志放到 warn', () => {
     expect(all).toContain('探针：error 必须可见')
     // debug 留在默认关闭：它是排查时才开的，默认吐出来会淹掉真正的线索。
     expect(all).not.toContain('探针：debug 不该出现')
+  })
+
+  it('printf 占位符被展开，Error 带着堆栈 —— 上游的告警几乎都是这种写法', () => {
+    // 0.9.0 的 exporter 把参数原样拼起来：`warn('watcher error on %s', path)` 印成
+    // 「watcher error on %s /path」，`Error` 经 JSON.stringify 只剩 `{}`。
+    const ctx = new Context()
+    installStderrLog(ctx)
+    const cap = captureStderr()
+    try {
+      ctx.logger.warn('探针：%s 在 %d 行', 'a.ts', 42)
+      ctx.logger.warn(new Error('探针：带堆栈的错误'))
+    } finally {
+      cap.restore()
+    }
+    const all = cap.lines.join('')
+    expect(all).toContain('探针：a.ts 在 42 行')
+    expect(all).not.toContain('%s')
+    expect(all).toContain('探针：带堆栈的错误')
+    expect(all).toMatch(/\n\s+at /)
   })
 })

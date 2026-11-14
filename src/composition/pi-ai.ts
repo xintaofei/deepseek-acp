@@ -47,7 +47,13 @@ export async function loadPiAi(): Promise<PiAiModule> {
 
 /** pi-ai 在设置服务里的命名空间；目录条目靠它辨认。 */
 const PI_AI_NS = 'llm-pi-ai'
-// Root and bridge contexts must wait for the same in-flight loader mount.
+/**
+ * 每个根 context 上正在进行的那一次挂载。
+ *
+ * 启动路径传根 context，`providers/*` 传 bridge 的子 context，两者可能同时进来。
+ * 按 `ctx.root` 记，后来的等在同一个 promise 上，而不是各自挂一次、第二次以「已声明」
+ * 失败。挂完即删：之后靠查注册表判断（见下）。
+ */
 const mounts = new WeakMap<object, Promise<void>>()
 
 /**
@@ -84,7 +90,8 @@ export async function ensurePiAi(ctx: Context): Promise<void> {
         name: '@deepseek-ai/dsh-llm-pi-ai',
         config: ctx.get('acpSettings')?.section(PI_AI_NS) ?? {},
       }
-      // The provider settings namespace follows its stable loader entry id.
+      // 条目 id 固定为 `llm-pi-ai`：pi-ai 拿 Loader 条目 id 当自己的设置命名空间
+      // （`settingsNs`），上面的查重与 `providers/*` 都靠这个名字认它。
       loader.ensureId(entry)
       await loader.create(entry)
       await loader.await()
