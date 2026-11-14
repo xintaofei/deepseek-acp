@@ -7,7 +7,8 @@
  */
 
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Logger, type Exporter } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import {
   PROTOCOL_VERSION,
   client as createClientApp,
@@ -25,14 +26,15 @@ import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import LlmService from '@deepseek-ai/dsh-llm'
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
+import * as ImageOffload from '@deepseek-ai/dsh-compaction-image-offload'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
-import FileSettings from '@deepseek-ai/dsh-settings-file'
 import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
 import SessionService from '@deepseek-ai/dsh-session'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionTitle from '@deepseek-ai/dsh-session-title'
 import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
@@ -52,6 +54,8 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk'
+import { AcpSettings } from '../src/composition/settings.js'
+import { SessionListIndex } from '../src/session/list-index.js'
 import { ensurePiAi } from '../src/composition/pi-ai.js'
 import { mountNativeShell, type NativeShellToolName } from '../src/composition/shell.js'
 import * as bridge from '../src/index.js'
@@ -265,6 +269,11 @@ export async function createHarness(
     /** Explicit PowerShell executable for Windows executor compatibility tests. */
     pwshPath?: string
     sessionsRoot?: string
+    /**
+     * 挂 `session/list` 的标题索引，文件落在这里。缺省不挂：大多数用例要的是
+     * 「每次都从日志折出来」那条最直接的路径。
+     */
+    listIndex?: string
     commands?: boolean
     planMode?: boolean
     questions?: boolean
@@ -288,14 +297,17 @@ export async function createHarness(
      */
     altProvider?: boolean
     /**
-     * 挂设置服务与本地凭据，两者都**关进这个目录**（`<它>/settings.yaml`、
-     * `<它>/.credentials.yaml`）。
+     * 挂设置服务与本地凭据，两者都**关进这个目录**（`<它>/deepseek-acp/settings.yaml`、
+     * `<它>/.credentials.yaml`；旧文档 `<它>/settings.yaml[.imported]` 只读）。
      *
      * 给路径而不是布尔，与 `skills` 同样的理由，而且更硬：这条链会**写盘**，
      * 一个忘了隔离的用例会去改本机真正的 `~/.dsh/.credentials.yaml`。
      */
     settings?: string
-    /** Explicit inherited environment layer; useful for host-independent credential tests. */
+    /**
+     * 显式给出「继承的进程环境」那一层（`launchEnvironment` 的 `process` 来源）。
+     * 凭据相关的用例靠它摆脱开发机上真实的 `DEEPSEEK_API_KEY`。
+     */
     launchEnvironment?: Readonly<Record<string, string>>
     /**
      * 挂附件服务（图片输入，US-23），对象库**关进这个目录**。
@@ -320,25 +332,24 @@ export async function createHarness(
   //
   // 不往 stderr 打：`boot.ts` 里那条注释是对的，每个用例都吐一遍日志会淹掉真正的
   // 失败输出。收进数组，谁需要谁去读（`h.logs`）；真出事时由用例自己打出来。
-  ctx.logger.exporter({
+  const exporter: Exporter = {
     colors: false,
     // 不写 `levels` 时生效等级是 1，`warn`(2) 与 `debug`(3) 会被静默丢掉——而
     // 上游报告后台失败用的正是 `warn`。用例里全都收下，判断交给用例自己。
     levels: { default: 3 },
-    export(message: { type: string; name: string; args: unknown[] }) {
-      logs.push({
-        type: message.type,
-        name: message.name,
-        text: message.args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '),
-      })
+    // 与 `installStderrLog` 同一种展开方式：用例断言的文字要和生产里印出来的一样。
+    export(message) {
+      logs.push({ type: message.type, name: message.name, text: Logger.format(exporter, message) })
     },
-  })
+  }
+  ctx.logger.exporter(exporter)
   // `SessionProjections` 在这份基础组合里不再可选：`AgentLoop` 现在 inject 它
   // （回合边界投影归它注册）。缺席时 loop 不会启动、也不报错——`session/new`
   // 会以「no agent factory registered」失败，而那条信息读起来像是漏挂了 loop。
   for (const plugin of [
     SystemPrompt,
     SessionService,
+    WorkingDirectory,
     LlmService,
     ToolRegistry,
     SessionProjections,
@@ -351,6 +362,7 @@ export async function createHarness(
   if (options.sessionsRoot !== undefined) {
     // `compression: 'none'` —— 用例出问题时日志能直接 cat 出来看。
     await ctx.plugin(JsonlPersistence, { root: options.sessionsRoot, compression: 'none' })
+    if (options.listIndex !== undefined) await ctx.plugin(SessionListIndex, { path: options.listIndex })
   }
   // 命令面与模式面分别可选：默认两个都不挂，于是「没挂时的降级行为」才是
   // 大多数用例跑的那条路径，不必专门去构造。
@@ -394,6 +406,7 @@ export async function createHarness(
   // 明确要测拒绝/提权的用例才要 `sandbox`。
   let mountedShell: NativeShellToolName | undefined
   if (options.shell !== undefined) {
+    if (ctx.get('fs') === undefined) await ctx.plugin(LocalFileSystem, {})
     await ctx.plugin(SpillStore, [])
     // 只挂 `-local`：它继承 `dsh-subprocess` 并注册同一个服务，两个都挂会以
     // 「服务已注册」失败；只挂 seam 则要到第一次执行才炸 spawn 不是函数。
@@ -427,11 +440,12 @@ export async function createHarness(
   // provider 配置面（`providers/*`）需要一个**可写**的设置服务与凭据服务。两者
   // 都指向用例给的隔离目录：这条链真的写盘。
   if (options.settings !== undefined) {
-    await ctx.plugin(FileSettings, {
-      path: join(options.settings, 'settings.yaml'),
-      // watch 关掉，理由与 boot.ts 一致：watcher 持有事件循环。用例里还多一层
-      // ——vitest 不会因为一个悬着的 watcher 失败，只会在整轮结束时挂住。
-      watch: false,
+    await ctx.plugin(Loader, { baseUrl: import.meta.url })
+    // 与生产同一种布局，只是 home 换成用例目录。旧文档路径**必须**一并给出：
+    // 缺省会退回真实的 `$DSH_HOME`，用例就读到了开发者本机的配置。
+    await ctx.plugin(AcpSettings, {
+      path: join(options.settings, 'deepseek-acp', 'settings.yaml'),
+      legacy: [join(options.settings, 'settings.yaml'), join(options.settings, 'settings.yaml.imported')],
     })
     await ctx.plugin(LocalCredentials, { dshHome: options.settings, watch: false })
     // 走与生产同一条幂等入口：`providers/*` 也会调它，两处各挂一次会以
@@ -443,6 +457,8 @@ export async function createHarness(
     // `dshHome` 显式给出：`attachment-local` 缺省会走 `$DSH_HOME` 再退到
     // `~/.dsh`，而用例绝不能写进那里。
     await ctx.plugin(LocalAttachments, { dshHome: options.attachments })
+    // 与生产一致：收图的组合必须带上超预算恢复，见 boot.ts。
+    await ctx.plugin(ImageOffload)
   }
 
   // 只伪造模型这一层；回合生命周期走真实 agent loop。

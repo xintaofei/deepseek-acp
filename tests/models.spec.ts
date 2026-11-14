@@ -13,7 +13,8 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import LlmService from '@deepseek-ai/dsh-llm'
-import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
+import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
+import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import { describe, expect, it } from 'vitest'
 import { DEEPSEEK_MODELS, DEFAULT_MODEL, DEFAULT_PROVIDER } from '../src/launcher/boot.js'
 
@@ -25,11 +26,19 @@ const RETIRED = ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']
  *
  * 不用 `composeAgent`：它刻意不含 provider 适配器（那是部署配置而非 agent
  * 能力），而这里要断的恰恰是适配器怎么消化我们这份目录。
+ * @param catalog - `ours` 挂我们的覆盖；`upstream` 不覆盖，用上游自带的那份（TC-MODEL-03
+ *   拿它对比）。不用「传 undefined 表示上游」：显式传 undefined 会落到参数默认值上，
+ *   两边就成了同一份目录——这条用例第一版正是这样空过了变异测试。
  */
-async function llmOnly(): Promise<Context> {
+async function llmOnly(catalog: 'ours' | 'upstream' = 'ours'): Promise<Context> {
   const ctx = new Context()
+  // DSH 0.2 起没有 key 时官方路由的模型目录是空的。这里给一个假 key：既不依赖开发者
+  // 本机有没有 key，也不会真的去连模型 API（列目录与解析模型信息都不发请求）。
+  ctx.provide('launchEnvironment', createLaunchEnvironmentSnapshot([
+    { source: 'process', values: { DEEPSEEK_API_KEY: 'sk-offline-catalog-fixture' } },
+  ]))
   await ctx.plugin(LlmService)
-  await ctx.plugin(LlmDeepSeek, { reasoningEffort: 'high', models: DEEPSEEK_MODELS })
+  await ctx.plugin(LlmDeepSeek, { reasoningEffort: 'high', ...(catalog === 'ours' ? { models: DEEPSEEK_MODELS } : {}) })
   return ctx
 }
 
@@ -78,5 +87,40 @@ describe('TC-MODEL-02 适配器真的消化得了这份目录', () => {
     const ctx = await llmOnly()
     const info = await ctx.llm.resolveModelInfo(DEFAULT_PROVIDER, DEFAULT_MODEL)
     expect(info.inputModalities).toContain('image')
+  })
+})
+
+describe('TC-MODEL-03 覆盖不丢上游的字段', () => {
+  // 覆盖目录的代价：上游给条目加了字段，这里不照抄就静默丢掉。DSH 0.2 加的
+  // `toolUpdate` 就这样丢过一次——它管的是会话中途工具变了时的提示缓存，丢了不报错，
+  // 只让 KV cache 命中率掉下去。这里拿上游自带的目录逐条对比解析出的模型信息，
+  // 只放过展示文字（`description`：我们的是中文）。
+  //
+  // 这条红了不一定是我们错：可能是上游加了模型或字段。照抄过来，或者删掉覆盖、
+  // 直接用上游的目录，两条路都比让它继续漂着好。
+  it('模型 id 与顺序和上游一致', async () => {
+    const ours = await (await llmOnly()).llm.listModels(DEFAULT_PROVIDER)
+    const upstream = await (await llmOnly('upstream')).llm.listModels(DEFAULT_PROVIDER)
+    expect(ours.map((m) => m.id)).toEqual(upstream.map((m) => m.id))
+  })
+
+  it('除说明文字外，每条解析出的模型信息与上游逐字段相同', async () => {
+    const ours = await llmOnly()
+    const upstream = await llmOnly('upstream')
+    for (const { id } of await upstream.llm.listModels(DEFAULT_PROVIDER)) {
+      const { description: _ours, ...mine } = await ours.llm.resolveModelInfo(DEFAULT_PROVIDER, id)
+      const { description: _theirs, ...theirs } = await upstream.llm.resolveModelInfo(DEFAULT_PROVIDER, id)
+      expect(mine, id).toEqual(theirs)
+    }
+  })
+
+  it('默认模型带着两个缓存开关 —— 上面那条若被放宽，这条仍守着最贵的那次丢失', async () => {
+    const info = await (await llmOnly()).llm.resolveModelInfo(DEFAULT_PROVIDER, DEFAULT_MODEL)
+    expect(info.systemPromptUpdate).toBe('in-history')
+    expect(info.toolUpdate).toBe('addition-only')
+  })
+
+  it('每条都有中文说明 —— 这是还留着覆盖的唯一理由', () => {
+    for (const model of DEEPSEEK_MODELS) expect(model.description, model.id).toMatch(/[\u4e00-\u9fff]/)
   })
 })

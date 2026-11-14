@@ -91,8 +91,9 @@ export async function readSecret(io: SecretIo, prompt: string): Promise<string> 
  * 恰恰只有凭据这一层。装一整套 agent 只为写一行 YAML，既慢又把失败面铺大了。
  *
  * 落点是 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`，由 provider 自己保证）。
- * 选它而不是 `$DSH_HOME/.env`，是因为这一层**赢过**两个 `.env` 层：用户之前在
- * `.env` 里放过一个过期 key 的话，登录写的新 key 会立刻生效，而不是被旧值压住。
+ * DSH 0.2 起这一层压过一切，**包括客户端传进来的环境变量**，所以写完之后，编辑器
+ * 配置里填的 `DEEPSEEK_API_KEY` 就不再生效。成功提示里明说这一点：用户多半是在
+ * 编辑器里配过 key 才来跑这一步的，不说的话，他之后在那里改 key 会发现改了没用。
  *
  * 提示与结果一律走 **stderr**：stdout 在这个进程里虽然不是协议通道（`--setup` 根本
  * 不起服务），但保持同一条约定，排查时不必先想「这次是哪种模式」。
@@ -140,5 +141,6 @@ export async function runSetup(env: NodeJS.ProcessEnv, io?: SecretIo): Promise<n
   }
 
   streams.output.write(`deepseek-acp: 已写入 ${CREDENTIAL_REF}，可以回到编辑器了\n`)
+  streams.output.write(`deepseek-acp: 此后它优先于编辑器配置里的 ${CREDENTIAL_REF}；要换 key，再跑一次 --setup\n`)
   return 0
 }

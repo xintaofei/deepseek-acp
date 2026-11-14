@@ -16,6 +16,36 @@ and can be configured as shown below, but has not yet been validated feature by 
 
 ---
 
+## DSH 0.2 compatibility
+
+This branch pins every DSH package to **0.2.1-rc.2** and requires **Node 22.19.0 or later**.
+It still assembles DSH inside the ACP process; it does not launch the official desktop runtime.
+New sessions use the native v4 log. The upstream persistence backend can restore supported v3
+logs and publishes a v4 successor while retaining the original v3 bytes. Migration support is
+subject to the upstream format policy; an old harness cannot read the resulting v4 log.
+
+The existing editor features remain in scope: streaming, tool cards, approval, questions,
+session restore/fork, model selection, MCP, and provider configuration. ACP provider edits are
+stored in `$DSH_HOME/deepseek-acp/settings.yaml` (secrets go to the credential store), without
+modifying native DSH profiles. The previous location, `$DSH_HOME/settings.yaml`, is no longer
+written: upstream DSH 0.2 renames that file to `settings.yaml.imported` when it starts. Routes
+configured with 0.9.0 are imported read-only from either file until the first edit. The official
+API-key route remains deployment-owned and read-only in the ACP provider editor.
+
+The first `session/list` after upgrading has to read each old v3 log once, and on DSH 0.2 each of
+those reads scans the whole session root. The list answers within about two seconds, so sessions
+that were not read in time show up without a title. The reads continue in the background and are
+saved to an index next to the session root, so later lists have every title and do not reopen
+unchanged logs.
+
+**A newer kernel does not mean all official features are exposed.** Native background jobs,
+child-agent delegation, official account login/search, and the desktop extension composition are
+not added by this upgrade. Question forms also depend on client support: the permission-button
+fallback supports choices, but cannot collect free text. This scope preserves the project's
+existing composition boundaries.
+
+---
+
 ## Why This Exists
 
 DeepSeek Harness ships with an ACP server (`@deepseek-ai/dsh-acp`), but it is designed for
@@ -100,6 +130,18 @@ but without progress updates.
 agent injects an escalation prompt. It does not add anything to the tool catalog, reject the call,
 or rewrite its arguments. The model retains control, so legitimate repeated calls continue to work.
 
+**Instruction files and skills.** In every directory from the project root (the nearest `.git`)
+down to the session cwd, `AGENTS.md`, `CLAUDE.md`, and their `.local.md` overlays are loaded into
+the model context. Two user-wide files are added too: `$DSH_HOME/AGENTS.md` (`~/.dsh/AGENTS.md`)
+and, **new in DSH 0.2**, `$DSH_AGENTS_HOME/AGENTS.md` (`~/.agents/AGENTS.md` by default). The total is
+capped at 40,000 bytes. Skills are discovered under `<project>/.dsh/skills`,
+`<project>/.agents/skills`, `$DSH_HOME/skills`, and `$DSH_AGENTS_HOME/skills`; adding or editing a
+skill takes effect without reconnecting.
+
+**`~/.agents` is shared with other agent tools.** Whatever another tool, or a script you ran, puts in
+`~/.agents/AGENTS.md` or `~/.agents/skills` also reaches DeepSeek's context. Check what is there, or
+set `DSH_AGENTS_HOME` in the client's environment configuration to a directory you control.
+
 **Image input.** Paste or drag images into the editor. Text and images enter the model in their
 original interleaved order, so `before [image] after [image]` does not become
 `before after [image] [image]`. Image bytes are stored in a content-addressed store under
@@ -142,7 +184,8 @@ There are two ways to provide an API key; choose one:
 
 - **`deepseek-acp --setup`**: paste the key once in an interactive prompt. It is stored in
   `$DSH_HOME/.credentials.yaml` with mode `0600`. See [Login](#login) below.
-- **Client environment variables**: both configurations below show where to set one.
+- **Client environment variables**: both configurations below show where to set one. If a key is
+  already stored through `--setup`, the stored key is used instead.
 
 **Do not rely on `export` in `.zshrc`.** GUI editors do not inherit the login shell environment,
 and neither do the child processes they spawn. This is why `--setup` stores credentials in a file
@@ -172,10 +215,13 @@ same command manually:
 deepseek-acp --setup      # Paste the key and press Enter. Terminal input is hidden.
 ```
 
-The stored credential key is `DEEPSEEK_API_KEY`, written to `$DSH_HOME/.credentials.yaml`. This
-source takes precedence over the two `.env` layers, so an old key left in `.env` cannot override it.
-An environment variable explicitly passed to the process still has the highest priority, because
-it represents the intent for that particular run.
+The stored credential key is `DEEPSEEK_API_KEY`, written to `$DSH_HOME/.credentials.yaml`.
+**Since DSH 0.2 the stored key wins over the environment**, including a `DEEPSEEK_API_KEY` that the
+editor passes to the agent (0.9.0 and earlier did the opposite). After running `--setup`, changing
+the key in the editor configuration has no effect; run `--setup` again instead, or delete the
+`DEEPSEEK_API_KEY` entry from that file to go back to the environment variable. When both are set
+and differ, the agent writes one line to stderr at startup saying which one it uses; neither value
+is printed. `.env` files are not read.
 
 Advertising this method does **not** block session creation. This project never returns
 `auth_required`; without a key, the first turn still fails with `MISSING_CREDENTIAL`. Terminal Auth
@@ -214,7 +260,7 @@ Enter the key in the **DeepSeek Harness Configuration** panel on the same page:
 | Field | Description |
 |---|---|
 | API endpoint | Leave empty to use the official endpoint |
-| API key | Passed to the agent as `DEEPSEEK_API_KEY`; **leave empty after using `--setup`**, because environment variables override the credential file |
+| API key | Passed to the agent as `DEEPSEEK_API_KEY`; **ignored once you have used `--setup`**, because the credential file wins (since DSH 0.2) |
 
 **Save DeepSeek Configuration** affects only **new** sessions. Reconnect any running session to
 apply changes. The model and reasoning level are not configured in this panel; they are

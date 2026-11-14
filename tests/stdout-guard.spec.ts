@@ -6,7 +6,9 @@
  */
 
 import { spawn } from 'node:child_process'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { AGENT_INFO } from '../src/protocol/initialize.js'
@@ -134,6 +136,59 @@ describe('TC-GUARD-02 断连即退出（无孤儿进程）', () => {
     })
 
     // code === null 表示只能靠 SIGKILL 收场 —— 编辑器场景下就是一个孤儿进程。
+    expect(exit.code, `进程未自行退出（${exit.ms}ms 后被强杀）；stderr=${exit.stderr.slice(0, 400)}`).toBe(0)
+  }, 30_000)
+
+  it('技能目录已被监听时同样在 5s 内退出', async () => {
+    // 上一条只等到 `initialize`，那时技能 watcher 还不存在：它们是在第一次**列技能**
+    // 时按扫到的根建立的，而 `session/new` 要列一次（斜杠补全）。技能热加载开着
+    // （boot.ts 的 SkillFilesystem），这条守的就是「watcher 不能拖住进程」。
+    const cwd = mkdtempSync(join(tmpdir(), 'dsacp-guard-skills-'))
+    mkdirSync(join(cwd, '.git'))
+    mkdirSync(join(cwd, '.dsh', 'skills', 'guard-probe'), { recursive: true })
+    writeFileSync(
+      join(cwd, '.dsh', 'skills', 'guard-probe', 'SKILL.md'),
+      '---\nname: guard-probe\ndescription: probe\n---\n\nbody\n',
+    )
+    const exit = await new Promise<{ code: number | null; ms: number; stderr: string; listed: boolean }>(
+      (resolve, reject) => {
+        const child = spawn(process.execPath, [BIN], { stdio: ['pipe', 'pipe', 'pipe'] })
+        let stderr = ''
+        let stdout = ''
+        let closing = false
+        child.stderr.on('data', (d: Buffer) => (stderr += d.toString()))
+        child.on('error', reject)
+        for (const frame of [
+          { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } },
+          { jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } },
+        ]) {
+          child.stdin.write(`${JSON.stringify(frame)}\n`)
+        }
+        // 就绪信号是带着这个技能的斜杠目录：它出现，说明技能已经列过、watcher 已建立。
+        child.stdout.on('data', (d: Buffer) => {
+          stdout += d.toString()
+          if (closing || !stdout.includes('guard-probe')) return
+          closing = true
+          const t0 = Date.now()
+          child.stdin.end()
+          const orphan = setTimeout(() => {
+            child.kill('SIGKILL')
+            resolve({ code: null, ms: Date.now() - t0, stderr, listed: true })
+          }, 5_000)
+          child.on('exit', (code) => {
+            clearTimeout(orphan)
+            resolve({ code, ms: Date.now() - t0, stderr, listed: true })
+          })
+        })
+        // 兜底：技能一直没出现时别把用例挂死，交给下面的断言报出来。
+        setTimeout(() => {
+          if (closing) return
+          child.kill('SIGKILL')
+          resolve({ code: null, ms: 0, stderr, listed: false })
+        }, 20_000)
+      },
+    )
+    expect(exit.listed, `斜杠目录里没出现 guard-probe；stderr=${exit.stderr.slice(0, 400)}`).toBe(true)
     expect(exit.code, `进程未自行退出（${exit.ms}ms 后被强杀）；stderr=${exit.stderr.slice(0, 400)}`).toBe(0)
   }, 30_000)
 })

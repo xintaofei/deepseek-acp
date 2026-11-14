@@ -302,7 +302,7 @@ describe('TC-MAP-05 事件映射', () => {
     expect(mapEvent(event, { presenter })).toMatchObject([{ sessionUpdate: 'tool_call', toolCallId: CID }])
   })
 
-  it('tool/result 从 message.content[0] 读取 callId 与结果', () => {
+  it('tool/result 从 tool message 读取 callId 与结果', () => {
     presenter.call(CID, 'ls', '{}')
     const event = {
       type: 'tool/result',
@@ -311,8 +311,9 @@ describe('TC-MAP-05 事件映射', () => {
         turn: 1,
         step: 1,
         message: {
-          role: 'user',
-          content: [{ type: 'tool-result', toolCallId: CID, content: [{ type: 'text', text: 'ok' }], isError: false }],
+          role: 'tool',
+          source: { kind: 'tool', callId: CID },
+          toolCallId: CID, isError: false, content: [{ type: 'text', text: 'ok' }],
         },
       },
     } as unknown as SessionEvent
@@ -325,7 +326,7 @@ describe('TC-MAP-05 事件映射', () => {
     const event = {
       type: 'tool/result',
       surfaceOp: 'replace',
-      data: { turn: 1, step: 1, message: { role: 'user', content: [{ type: 'tool-result', toolCallId: CID, content: [] }] } },
+      data: { turn: 1, step: 1, message: { role: 'tool', source: { kind: 'tool', callId: CID }, toolCallId: CID, content: [] } },
     } as unknown as SessionEvent
     expect(mapEvent(event, { presenter })).toEqual([])
   })

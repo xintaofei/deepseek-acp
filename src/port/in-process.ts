@@ -287,6 +287,8 @@ export function createInProcessPort(ctx: Context): HarnessPort {
   // 下会抛错，所以走 `get` 这条明确的可选路径。
   const tools = ctx.get('tools')
   const persistence = ctx.get('sessionPersistence')
+  // 列表的标题索引是可选的：没挂就退回逐条读日志（会话少、或用例里都够用）。
+  const listIndex = ctx.get('sessionListIndex')
   const sessions = ctx.get('sessions')
   const commandRuntime = ctx.get('commands')
   const planMode = ctx.get('planMode')
@@ -462,8 +464,23 @@ export function createInProcessPort(ctx: Context): HarnessPort {
       : {
           async list(): Promise<SessionSummary[]> {
             const snapshots = await persistence.list()
-            // header 里没有标题，也没有「最后活动时间」，两者都只能从日志折出来
-            // ——于是列表要把每条日志读一遍。这是有代价的，但会话选择器不给标题
+            // header 里没有标题，也没有「最后活动时间」，两者都只能从日志折出来。
+            // 挂了索引就只读变过的那几条，而且读有时间预算（理由见
+            // `src/session/list-index.ts`：DSH 0.2 上 v3 旧日志逐条读是 O(N²)）。
+            if (listIndex !== undefined) {
+              const facts = await listIndex.describe(snapshots, async ({ header }) => {
+                const { events } = await readStored(persistence, header.id)
+                return { title: foldSessionTitle(events)?.title, updatedAt: events.at(-1)?.time }
+              })
+              return snapshots.map(({ header }, i) => ({
+                sessionId: header.id,
+                cwd: header.cwd,
+                createdAt: header.createdAt,
+                title: facts[i]?.title,
+                updatedAt: facts[i]?.updatedAt,
+              }))
+            }
+            // 没有索引：把每条日志读一遍。这是有代价的，但会话选择器不给标题
             // 就只剩一串 id，那正是这个功能唯一要回答的问题。并发有上限，
             // 单条读失败不影响其余条目。
             return await mapWithLimit(snapshots, LIST_READ_CONCURRENCY, async ({ header }) => {
@@ -614,7 +631,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
   //
   // 组合没挂设置服务、或挂了个只读的，整面缺席：能力位随之不 advertise。写不了
   // 却声明可写，客户端会拿到一个点了报错的表单。
-  const settings = ctx.get('settings')
+  const settings = ctx.get('acpSettings')
   const providers: ProviderPlane | undefined =
     settings === undefined || !settings.writable
       ? undefined
@@ -633,7 +650,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             // 目录 = 「可以配的」，活跃路由 = 「现在真的能用的」。两者都要：只报
             // 目录会漏掉静态组合进来的 `deepseek-official`（它不在目录里），只报
             // 活跃路由则会让一个尚未配置的 provider 无从被配置。
-            const directory = llm.listConfigurableProviders()
+            const directory = llm.listConfigurableProviders().filter(entry => entry.settingsNs === 'llm-pi-ai')
             const live = new Map(llm.listProviders().map((p) => [p.id, p.name]))
             // **必须 `redactSecrets`**：上游明写每个线上表面都得传，否则 API Key
             // 会随描述符原样发给客户端。
@@ -678,7 +695,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           async set(input) {
             await ensurePiAi(ctx)
             const llm = ctx.get('llm')
-            const entry = llm?.listConfigurableProviders().find((e) => e.provider === input.id)
+            const entry = llm?.listConfigurableProviders().find((e) => e.provider === input.id && e.settingsNs === 'llm-pi-ai')
             if (entry === undefined) {
               throw new Error(`provider "${input.id}" is not configurable`)
             }
@@ -706,7 +723,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           async disable(id) {
             await ensurePiAi(ctx)
             const llm = ctx.get('llm')
-            const entry = llm?.listConfigurableProviders().find((e) => e.provider === id)
+            const entry = llm?.listConfigurableProviders().find((e) => e.provider === id && e.settingsNs === 'llm-pi-ai')
             if (entry === undefined) {
               throw new Error(`provider "${id}" is not configurable`)
             }

@@ -9,7 +9,7 @@ npm test            # 不需要 API Key
 npm run build
 ```
 
-要求 Node ≥ 22。
+要求 Node ≥ 22.19.0（DSH 0.2 / pi-ai 的最低版本）。
 
 **跑真模型**（可选，仅用于人工验证）：
 
@@ -93,7 +93,7 @@ ACP_PROBE_FS_READ=1   npm run probe -- "..."   # 声明 fs.readTextFile，走读
 npm run typecheck && npm run build && npm test
 ```
 
-CI 会在 ubuntu 与 macos × Node 22/24 上跑同样这三步。
+CI 会在 ubuntu、macos 与 Windows × Node 22/24 上跑同样这三步。
 
 > `tsconfig.json` 与 `vitest.config.ts` 里排除了 `reference/` 与 `spikes/`。
 > 这两个目录**不在版本库里**（维护者本地保留的上游参考副本与一次性技术验证），

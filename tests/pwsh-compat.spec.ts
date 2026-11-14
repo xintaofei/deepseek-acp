@@ -38,11 +38,11 @@ describe.skipIf(process.platform !== 'win32')('TC-PWSH Windows PowerShell compat
       expect(h.ctx.tools.get('pwsh')).toBeDefined()
       expect(h.ctx.tools.get('bash')).toBeUndefined()
 
-      const result = await h.ctx.shell.run(h.ctx.shell.resolve({
+      const result = await (await h.ctx.shell.execute(h.ctx.shell.resolve({
         command: "Write-Output '中文 output'; exit 7",
         workdir: unicodeWorkdir(),
         env: { PATH: pathWithoutGitBash() },
-      }))
+      }))).result()
       expect(result.stdout.text).toContain('中文 output')
       expect(result.exitCode).toBe(7)
     } finally {
@@ -63,10 +63,10 @@ describe.skipIf(process.platform !== 'win32')('TC-PWSH Windows PowerShell compat
     async () => {
       const h = await createHarness({ shell: 'sandbox', pwshPath: WINDOWS_POWERSHELL })
       try {
-        const result = await h.ctx.shell.run(h.ctx.shell.resolve({
+        const result = await (await h.ctx.shell.execute(h.ctx.shell.resolve({
           command: "Write-Output $ExecutionContext.SessionState.LanguageMode; Write-Output '受限中文'",
           workdir: unicodeWorkdir(),
-        }))
+        }))).result()
         expect(result.exitCode).toBe(0)
         expect(result.stdout.text).toContain('ConstrainedLanguage')
         expect(result.stdout.text).toContain('受限中文')
@@ -100,7 +100,7 @@ describe.skipIf(process.platform !== 'win32')('TC-PWSH Windows PowerShell compat
       try {
         const workdir = unicodeWorkdir()
         for (const probe of commands) {
-          const result = await h.ctx.shell.run(h.ctx.shell.resolve({ command: probe.command, workdir }))
+          const result = await (await h.ctx.shell.execute(h.ctx.shell.resolve({ command: probe.command, workdir }))).result()
           expect(result.exitCode, result.stderr.text).toBe(0)
           expect(result.stdout.text).toMatch(probe.output)
         }

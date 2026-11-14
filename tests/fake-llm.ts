@@ -59,6 +59,8 @@ export class FakeLlmAdapter extends LlmAdapter {
   delayMs = 0
   /** 置位后 stream 抛错，用于验证回合失败路径 */
   failWith: Error | undefined
+  /** 与 {@link failWith} 相同，但只抛一次；用于验证「失败 → 恢复 → 重试」。 */
+  failOnce: Error | undefined
   /**
    * 置位后本次流**先照常吐出 {@link deltas}、再以一个 error finish 收尾**；
    * 产出后清空，下一次调用正常作答。
@@ -211,12 +213,15 @@ export class FakeLlmAdapter extends LlmAdapter {
   /** 每次 stream 收到的图片附件 id，跨全部消息按序收集。 */
   imagesUsed: string[][] = []
 
+  /** 每次 stream 收到的图片里，已被 `image/offload` 换成占位的张数。 */
+  offloadedImagesUsed: number[] = []
+
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
     this.modelsUsed.push(options.model)
     this.providersUsed.push(options.provider)
     {
-      type Block = { type?: string; attachment?: { attachmentId?: string } }
+      type Block = { type?: string; attachment?: { attachmentId?: string }; offloaded?: boolean }
       const perMessage = options.messages.map((message) =>
         Array.isArray(message.content) ? (message.content as Block[]) : [],
       )
@@ -225,6 +230,9 @@ export class FakeLlmAdapter extends LlmAdapter {
           .flat()
           .filter((block) => block.type === 'image')
           .map((block) => String(block.attachment?.attachmentId)),
+      )
+      this.offloadedImagesUsed.push(
+        perMessage.flat().filter((block) => block.type === 'image' && block.offloaded === true).length,
       )
       const withImage = perMessage.find((blocks) => blocks.some((block) => block.type === 'image'))
       this.blockKindsUsed.push((withImage ?? perMessage.at(-1) ?? []).map((block) => String(block.type)))
@@ -245,6 +253,11 @@ export class FakeLlmAdapter extends LlmAdapter {
     )
     this.effortsUsed.push(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
     if (this.failWith !== undefined) throw this.failWith
+    const once = this.failOnce
+    if (once !== undefined) {
+      this.failOnce = undefined
+      throw once
+    }
 
     const pendingCall = this.toolCall
     if (pendingCall !== undefined) {

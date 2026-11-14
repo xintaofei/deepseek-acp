@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config'
+import { isolatedHomes } from './tests/isolated-homes.js'
 
 export default defineConfig({
   test: {
@@ -9,6 +10,9 @@ export default defineConfig({
     exclude: ['reference/**', 'spikes/**', 'node_modules/**', 'tests/pwsh-encoding.spec.ts'],
     testTimeout: 20_000,
     hookTimeout: 20_000,
+    // `DSH_HOME` 与 `DSH_AGENTS_HOME` 指向临时目录：按生产默认值解析的路径不许落到
+    // 开发者本机的 `~/.dsh`、`~/.agents`。理由见 `tests/isolated-homes.ts`。
+    env: isolatedHomes(),
     // Windows shell tests start real ACL runners and Windows PowerShell
     // processes. Four-way file parallelism saturates small CI/dev machines and
     // turns fixed lifecycle deadlines into load tests instead of regressions.

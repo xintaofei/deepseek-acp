@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"upgrade-v3-fixture","createdAt":1792713600000,"cwd":"C:/fixture","isSeeded":false,"delegationDepth":0}
+{"type":"user/message","seq":0,"time":1792740499565,"data":{"id":"v3-user","role":"user","source":{"kind":"user"},"content":[{"type":"text","text":"LEGACY_V3_MARKER"}]},"surfaceOp":"append"}

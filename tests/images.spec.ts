@@ -15,6 +15,7 @@
 
 import { join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { IMAGE_OFFLOAD_REQUIRED_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import { MODEL_OPTION } from '../src/config/options.js'
 import { createHarness, type TestHarness } from './harness.js'
@@ -221,6 +222,34 @@ describe('TC-IMG-03 拒绝路径', () => {
     })
     // 走了模型而不是命令面，图片因此还在。
     expect(h.llm.imagesUsed.at(-1)).toHaveLength(1)
+    h.disposeBridge()
+  }, 30_000)
+})
+
+describe('TC-IMG-04 图片超预算时卸载最旧的图再重试', () => {
+  // DSH 0.2 起适配器不再自己丢图，而是以 `IMAGE_OFFLOAD_REQUIRED` 失败；接住它的
+  // 只有 `dsh-compaction-image-offload`。漏挂时这一轮直接失败，此后每一轮都一样。
+  it('回合照常结束，重试的那次请求里最旧的图已换成占位', async () => {
+    const h = await createHarness({ attachments: realTempDir('dsacp-att-') })
+    const sessionId = await visionSession(h)
+    await h.acp.request('session/prompt', {
+      sessionId: sessionId as never,
+      prompt: [{ type: 'text', text: '第一张' }, image()],
+    })
+    h.llm.failOnce = new LlmError('request images exceed the route budget', IMAGE_OFFLOAD_REQUIRED_CODE, {
+      offloadImages: 1,
+    })
+    const callsBefore = h.llm.calls
+    const result = (await h.acp.request('session/prompt', {
+      sessionId: sessionId as never,
+      prompt: [{ type: 'text', text: '第二张' }, image()],
+    })) as { stopReason: string }
+    expect(result.stopReason).toBe('end_turn')
+    // 失败的一次 + 重试的一次。
+    expect(h.llm.calls - callsBefore).toBe(2)
+    // 重试时两张图都还在请求里，最旧的那张被标成已卸载，最新的照常发送。
+    expect(h.llm.imagesUsed.at(-1)).toHaveLength(2)
+    expect(h.llm.offloadedImagesUsed.at(-1)).toBe(1)
     h.disposeBridge()
   }, 30_000)
 })

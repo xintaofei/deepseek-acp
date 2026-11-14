@@ -169,7 +169,8 @@ function actionsToEvents(actions: Action[]): SessionEvent[] {
             message: {
               id: `r-${id}`,
               role: 'tool',
-              content: [{ type: 'tool-result', toolCallId: id, content: [], isError: a.isError }],
+              source: { kind: 'tool', callId: id },
+              toolCallId: id, isError: a.isError, content: [],
             },
           },
         })

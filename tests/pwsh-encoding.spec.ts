@@ -137,8 +137,8 @@ describe.skipIf(process.platform !== 'win32')('TC-PWSHENC read-only 下的原生
     const h = await createHarness({ shell: 'sandbox', pwshPath })
     try {
       const workdir = realTempDir('dsacp-enc-')
-      const out = await h.ctx.shell.run(h.ctx.shell.resolve({ command: probeCommand('stdout'), workdir }))
-      const err = await h.ctx.shell.run(h.ctx.shell.resolve({ command: probeCommand('stderr'), workdir }))
+      const out = await (await h.ctx.shell.execute(h.ctx.shell.resolve({ command: probeCommand('stdout'), workdir }))).result()
+      const err = await (await h.ctx.shell.execute(h.ctx.shell.resolve({ command: probeCommand('stderr'), workdir }))).result()
       expect(out.exitCode, out.stderr.text).toBe(0)
       expect(err.exitCode).toBe(0)
       return { stdout: out.stdout.text, stderr: err.stderr.text }
