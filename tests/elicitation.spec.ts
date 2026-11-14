@@ -61,6 +61,7 @@ describe('TC-ELI-01 问题 → 表单', () => {
     }
     expect(property.type).toBe('string')
     expect(property.title).toBe('选一个')
+    // 单问题时正文已经是 message，description 里不再重复它。
     expect(property.description).toBe('两种都能跑通')
     expect(property.oneOf).toEqual([
       { const: 'Redis', title: 'Redis', description: '要额外部署' },
@@ -84,6 +85,61 @@ describe('TC-ELI-01 问题 → 表单', () => {
     expect((properties['free'] as { oneOf?: unknown }).oneOf).toBeUndefined()
     // 多问题时标题行只报个数，免得把每个问题重复两遍。
     expect(request.message).toBe('需要你回答 2 个问题')
+  })
+
+  it('多问题且带 header 时，问题正文进 description —— 否则正文在发出时就丢了（#10）', () => {
+    // 字段只有 title / description 两个文字槽：header 占了 title，而多问题时
+    // message 只报个数。正文不进 description 的话整张表单上就找不到它。
+    const request = toElicitation(SESSION, [
+      {
+        id: 'scope',
+        header: '备份范围',
+        question: '现在就开始备份吗？先从哪一段跑？',
+        options: [{ label: '全盘' }, { label: '只备份用户目录' }],
+      },
+      {
+        id: 'spotlight',
+        header: '先降压',
+        question: '要不要先关掉 Spotlight 索引再备份？',
+        detail: '需要输一次 sudo 密码',
+        options: [{ label: '要，先关索引' }, { label: '不用，直接备份' }],
+      },
+    ])
+    const properties = schemaOf(request).properties ?? {}
+    const scope = properties['scope'] as { title: string; description?: string }
+    const spotlight = properties['spotlight'] as { title: string; description?: string }
+
+    expect(request.message).toBe('需要你回答 2 个问题')
+    expect(scope.title).toBe('备份范围')
+    expect(scope.description).toBe('现在就开始备份吗？先从哪一段跑？')
+    // 正文在前、detail 在后，空行隔开：先读到问的是什么，再读补充说明。
+    expect(spotlight.title).toBe('先降压')
+    expect(spotlight.description).toBe('要不要先关掉 Spotlight 索引再备份？\n\n需要输一次 sudo 密码')
+  })
+
+  it('没有 header 时正文本来就是 title，不再往 description 里重复一遍', () => {
+    const request = toElicitation(SESSION, [
+      { id: 'a', question: '要哪个？', detail: '随便选', options: [{ label: 'A' }] },
+      { id: 'b', question: '还有别的吗？' },
+    ])
+    const properties = schemaOf(request).properties ?? {}
+
+    expect(properties['a']).toMatchObject({ title: '要哪个？', description: '随便选' })
+    expect(properties['b']).toMatchObject({ title: '还有别的吗？' })
+    expect(properties['b']).not.toHaveProperty('description')
+  })
+
+  it('header 与正文相同、或 header 是空串时，不制造重复也不留空白标题', () => {
+    const request = toElicitation(SESSION, [
+      { id: 'same', header: '确认？', question: '确认？' },
+      { id: 'empty', header: '', question: '用哪个分支？' },
+    ])
+    const properties = schemaOf(request).properties ?? {}
+
+    expect(properties['same']).toMatchObject({ title: '确认？' })
+    expect(properties['same']).not.toHaveProperty('description')
+    expect(properties['empty']).toMatchObject({ title: '用哪个分支？' })
+    expect(properties['empty']).not.toHaveProperty('description')
   })
 
   it('呈现意图放进 _meta —— 通用客户端忽略它，认识的可以渲染成一次决策', () => {

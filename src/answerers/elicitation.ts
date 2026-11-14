@@ -39,11 +39,26 @@ function enumOptions(item: AskUserQuestionItem): EnumOption[] {
   }))
 }
 
-/** 一个问题 → 一个表单字段。 */
-function propertyFor(item: AskUserQuestionItem): ElicitationPropertySchema {
+/**
+ * 一个问题 → 一个表单字段。
+ *
+ * ACP 的字段只有 `title` 与 `description` 两个文字槽。有 `header` 时它占了
+ * `title`，问题正文就得挤进 `description`（排在 `detail` 前面）——否则正文在发出
+ * 的那一刻就没了，客户端拿到什么都补不回来（issue #10）。唯一的例外是正文已经
+ * 在别处显示：单问题时它就是整张表单的 `message`，再放一遍是重复。
+ * @param item - 问题
+ * @param questionInMessage - 问题正文是否已经作为表单的 `message` 显示
+ */
+function propertyFor(item: AskUserQuestionItem, questionInMessage: boolean): ElicitationPropertySchema {
+  // 空串 header 当作没有：拿它当标题等于一个空白标签，正文反而被挤走了。
+  const header = item.header === '' ? undefined : item.header
+  const showQuestion = header !== undefined && header !== item.question && !questionInMessage
+  const description = [showQuestion ? item.question : undefined, item.detail]
+    .filter((part) => part !== undefined && part !== '')
+    .join('\n\n')
   const common = {
-    title: item.header ?? item.question,
-    ...(item.detail === undefined ? {} : { description: item.detail }),
+    title: header ?? item.question,
+    ...(description === '' ? {} : { description }),
     // 呈现意图对通用客户端无意义，但也不该丢：认识 `plan-review` 的客户端可以
     // 把它渲染成一次决策而非普通选项列表，答案编码两种情况完全相同。
     ...(item.intent === undefined ? {} : { _meta: { intent: item.intent } }),
@@ -69,7 +84,7 @@ export function toElicitation(
   items: readonly AskUserQuestionItem[],
 ): CreateElicitationRequest {
   const properties: Record<string, ElicitationPropertySchema> = {}
-  for (const item of items) properties[item.id] = propertyFor(item)
+  for (const item of items) properties[item.id] = propertyFor(item, items.length === 1)
 
   return {
     mode: 'form',
