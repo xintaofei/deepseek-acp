@@ -21,6 +21,13 @@ import { createHarness, waitFor } from './harness.js'
 
 const SERVER = fileURLToPath(new URL('./fixtures/mock-mcp-server.mjs', import.meta.url))
 
+/**
+ * 平台定时器能表达的最大延时（2^31-1）。这里写字面量而非 import
+ * `MAX_TIMER_DELAY_MS`：用例要独立于实现证明「给的就是上限」，引用同一个
+ * 常量就变成常量与自己相等，一点没测。
+ */
+const TIMER_CEILING_MS = 2_147_483_647
+
 /** 一条 stdio server 声明。 */
 const stdio = (name: string, toolName: string, fail = false): McpServer => ({
   name,
@@ -255,8 +262,27 @@ describe('TC-MCP-07 不支持的传输显式拒绝', () => {
       serverName: 'a1_remote',
       url: 'https://example.com/mcp',
       headers: { 'X-Key': 'v' },
+      toolCallTimeoutMs: TIMER_CEILING_MS,
       failOnStartupError: true,
     })
+  })
+
+  it('两种传输都显式给出 toolCallTimeoutMs，值为定时器上限', () => {
+    // 漏掉这个字段不报错，只会静默退回 `dsh-mcp-client` 的 60 s 默认值，于是
+    // 一等人作答的 MCP 工具（codeg 的 `ask_user_question`、`wait_ms: 0` 的
+    // `get_delegation_status`）必然以 `Request timed out` 失败——卡片还开着，
+    // 模型已经收到超时，两边各看到一半真相。
+    //
+    // 断言写死 2^31-1 而不是 import 同一个常量：比常量与自己相等，等于没测。
+    // 这里要钉住的是「必须是定时器上限」这件事——写 60_000 是本缺陷，写
+    // 2^31 会溢出成 1 ms 并在每次调用上立刻超时，两种错法都该变红。
+    const cases = [
+      toMountSpec({ name: 'alpha', command: process.execPath, args: [], env: [] }, 1),
+      toMountSpec({ type: 'http', name: 'remote', url: 'https://example.com/mcp', headers: [] }, 1),
+    ]
+    for (const spec of cases) expect(spec.toolCallTimeoutMs).toBe(TIMER_CEILING_MS)
+    // 两种传输是两条独立分支，漏一条就是漏一半客户端。
+    expect(cases.map((spec) => spec.transport)).toEqual(['stdio', 'streamable-http'])
   })
 
   it('sse 与 acp 抛 UnsupportedMcpServer —— 静默跳过会让模型看不见工具且难查', () => {
