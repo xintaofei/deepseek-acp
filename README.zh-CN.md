@@ -249,6 +249,24 @@ MCP 开着时，`codeg-mcp` 会作为 server 挂进来，模型看到的工具�
 默认写在 `$DSH_HOME/sessions`（即 `~/.dsh/sessions`），可用
 `DEEPSEEK_ACP_SESSIONS_ROOT` 覆盖。会话恢复、列表与标题都从这里读。
 
+### 第三方插件
+
+组合本身是写死的，但留了一个挂载点：`DEEPSEEK_ACP_PLUGINS` 接受一个 JSON 数组，
+每项形如 `{ "name": <说明符>, "config"?: <交给 ctx.plugin 的 Config> }`。
+
+```sh
+export DEEPSEEK_ACP_PLUGINS='[{"name":"dsh-purge-community"}]'
+```
+
+`name` 交给 `import()`——包名（从本包位置解析）、绝对路径或 `file:` URL。挂载点固定在
+`acpBridge` 之前、`composeAgent` 之后，所以声明了 `inject: ['systemPrompt', 'tools']`
+的插件（例如只做运行时提示词注入的
+[dsh-purge](https://github.com/kingcharleslzy-ai/dsh-purge)）能拿到服务，也能影响本进程
+内的每一次会话。
+
+两条边界：挂载窗口内第三方代码写 stdout 会被改道到 stderr（AC-G1），窗口外才写的拦不住；
+任何一项加载失败只在 stderr 留一行，不影响服务启动。
+
 ---
 
 ## 致谢
