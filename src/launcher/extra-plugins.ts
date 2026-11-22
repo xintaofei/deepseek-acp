@@ -45,14 +45,34 @@ export interface ExtraPluginParse {
   readonly errors: readonly string[]
 }
 
-/** 挂载结果：成功挂上的模块名，以及失败项与原因（供一条汇总告警）。 */
+/**
+ * 挂载结果：成功挂上的模块名、失败项与原因，以及「挂上了但还在等服务」的项。
+ *
+ * `pending` 单列而不算进 `mounted`：`inject` 里的服务缺席时 Cordis 不报错，只让
+ * fiber 停在 PENDING、`apply` 一次都不跑。算成「已挂载」就等于在日志里告诉用户
+ * 配置生效了，而它其实什么都没做。
+ */
 export interface ExtraPluginMount {
   readonly mounted: readonly string[]
   readonly failed: readonly { readonly name: string; readonly reason: string }[]
+  readonly pending: readonly { readonly name: string; readonly missing: readonly string[] }[]
 }
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 从 `import()` 的命名空间里取出插件本体。
+ *
+ * 具名导出 `apply` 的模块（例如 dsh-purge）命名空间本身就是插件；只有
+ * `export default` 的模块要拆一层，与 `@deepseek-ai/cordis-plugin-loader` 的
+ * unwrapping 一致。两者都不是时原样交回，由 `ctx.plugin` 报 invalid plugin。
+ */
+function pluginOf(module: unknown): unknown {
+  const namespace = module as { apply?: unknown; default?: unknown } | null
+  if (typeof namespace?.apply === 'function') return module
+  return namespace?.default ?? module
 }
 
 /**
@@ -76,7 +96,7 @@ export function parseExtraPlugins(raw: string | undefined): ExtraPluginParse {
     return { rows: [], errors: [`${EXTRA_PLUGINS_ENV} 不是合法 JSON：${messageOf(error)}`] }
   }
   if (!Array.isArray(value)) {
-    return { rows: [], errors: [`${EXTRA_PLUGINS_ENV} 必须是数组，收到 ${Array.isArray(value) ? 'array' : typeof value}`] }
+    return { rows: [], errors: [`${EXTRA_PLUGINS_ENV} 必须是数组，收到 ${value === null ? 'null' : typeof value}`] }
   }
 
   const rows: ExtraPluginRow[] = []
@@ -136,27 +156,34 @@ async function withStdoutToStderr<T>(work: () => Promise<T>): Promise<T> {
  * `warn` 由调用方注入而不是在这里直接取 `ctx.logger`：组合里的 logger 是
  * `installStderrLog` 装出来的 exporter，而单测里的裸 `Context` 没有它。把告警
  * 出口做成参数，测试就不必为了测挂载而先搭一整套日志。
- * @param ctx - 组合上下文（只要 `plugin` 这一个能力）
+ * @param ctx - 组合上下文（只要 `plugin` 与查服务用的 `get`）
  * @param rows - {@link parseExtraPlugins} 的 `rows`
  * @param warn - 逐条失败告警的去处（调用方接 stderr）
  * @returns 成功与失败清单
  */
 export async function mountExtraPlugins(
-  ctx: Pick<Context, 'plugin'>,
+  ctx: Pick<Context, 'plugin' | 'get'>,
   rows: readonly ExtraPluginRow[],
   warn: (message: string) => void,
 ): Promise<ExtraPluginMount> {
   const mounted: string[] = []
   const failed: { name: string; reason: string }[] = []
+  const pending: { name: string; missing: string[] }[] = []
 
   for (const row of rows) {
     try {
       // 保护范围就是这一整段：import 会执行模块顶层代码，apply 会执行插件的装配。
       // 两者都是第三方代码，都可能 `console.log`。
-      await withStdoutToStderr(async () => {
+      const fiber = await withStdoutToStderr(async () => {
         const module: unknown = await import(row.name)
-        await ctx.plugin(module as never, row.config as never)
+        return await ctx.plugin(pluginOf(module) as never, row.config as never)
       })
+      const missing = Object.keys(fiber.inject).filter((service) => ctx.get(service) === undefined)
+      if (missing.length > 0) {
+        pending.push({ name: row.name, missing })
+        warn(`${row.name} 已挂载但未生效，缺少服务：${missing.join(', ')}`)
+        continue
+      }
       mounted.push(row.name)
     } catch (error) {
       // 逐项吞掉：一个插件起不来不该牵连下一个，更不该让 ACP 服务起不来。
@@ -164,5 +191,5 @@ export async function mountExtraPlugins(
       warn(`${row.name} 加载失败，已跳过：${messageOf(error)}`)
     }
   }
-  return { mounted, failed }
+  return { mounted, failed, pending }
 }

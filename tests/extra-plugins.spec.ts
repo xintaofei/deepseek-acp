@@ -55,6 +55,8 @@ describe('TC-PLUG-02 坏配置逐项报错，且不拖垮整份列表', () => {
     const parsed = parseExtraPlugins('{"name":"x"}')
     expect(parsed.rows).toEqual([])
     expect(parsed.errors[0]).toContain('必须是数组')
+    expect(parsed.errors[0]).toContain('object')
+    expect(parseExtraPlugins('null').errors[0]).toContain('null')
   })
 
   it('第三项拼错 —— 前两项照常保留，错误点名第几项', () => {
@@ -182,5 +184,65 @@ describe('TC-PLUG-05 挂载窗口内 stdout 一个字都不写（AC-G1）', () =
     // 协议帧就走在 stdout 上：这里出现一个字节，客户端那边就是「连接失败」。
     expect(out.join('')).not.toContain('TC-PLUG-05-LEAK')
     expect(err.join('')).toContain('TC-PLUG-05-LEAK')
+  })
+})
+
+describe('TC-PLUG-06 只有 default 导出的模块也挂得上', () => {
+  it('命名空间没有 apply 时拆 default —— 与 cordis-plugin-loader 的 unwrapping 一致', async () => {
+    const dir = realTempDir('dsacp-plug-')
+    const file = join(dir, 'default-only.mjs')
+    writeFileSync(
+      file,
+      [
+        'export default {',
+        '  name: "tc-plug-default",',
+        '  apply() { globalThis.__dsacpPlugDefault = (globalThis.__dsacpPlugDefault ?? 0) + 1 },',
+        '}',
+      ].join('\n'),
+      'utf8',
+    )
+    const ctx = new Context()
+    const warnings: string[] = []
+    try {
+      const result = await mountExtraPlugins(ctx, [{ name: pathToFileURL(file).href }], (message) => warnings.push(message))
+      expect(result.failed).toEqual([])
+      expect(result.mounted).toEqual([pathToFileURL(file).href])
+      expect((globalThis as Record<string, unknown>)['__dsacpPlugDefault']).toBe(1)
+      expect(warnings).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('TC-PLUG-07 inject 的服务缺席 —— 不算「已挂载」', () => {
+  it('apply 没跑过，就进 pending 并点名缺的服务', async () => {
+    // Cordis 对缺服务不报错，只让 fiber 停在 PENDING。若这里记成 mounted，boot
+    // 那行「N 个外部插件已挂载」就是在对用户撒谎。
+    const dir = realTempDir('dsacp-plug-')
+    const file = join(dir, 'needs-service.mjs')
+    writeFileSync(
+      file,
+      [
+        'export const name = "tc-plug-pending"',
+        'export const inject = ["tcPlugNoSuchService"]',
+        'export function apply() { globalThis.__dsacpPlugPendingRan = true }',
+      ].join('\n'),
+      'utf8',
+    )
+    const ctx = new Context()
+    const warnings: string[] = []
+    try {
+      const url = pathToFileURL(file).href
+      const result = await mountExtraPlugins(ctx, [{ name: url }], (message) => warnings.push(message))
+      expect(result.mounted).toEqual([])
+      expect(result.failed).toEqual([])
+      expect(result.pending).toEqual([{ name: url, missing: ['tcPlugNoSuchService'] }])
+      expect((globalThis as Record<string, unknown>)['__dsacpPlugPendingRan']).toBeUndefined()
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('tcPlugNoSuchService')
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 })
