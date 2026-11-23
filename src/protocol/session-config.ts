@@ -11,13 +11,14 @@ import type {
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Bridge } from '../bridge.js'
 import { invalidParams } from '../codec/errors.js'
-import type { RouteChoice } from '../config/options.js'
+import type { ConfigInputs, RouteChoice } from '../config/options.js'
 import {
   MODEL_OPTION,
   REASONING_OPTION,
   SANDBOX_OPTION,
   configOptions,
   decodeRouteValue,
+  providerDefaultValue,
 } from '../config/options.js'
 import type { SessionRecord } from '../session/table.js'
 
@@ -53,6 +54,10 @@ export async function routesFor(bridge: Bridge): Promise<RouteChoice[]> {
 }
 
 export async function optionsFor(bridge: Bridge, record: SessionRecord): Promise<SessionConfigOption[]> {
+  return configOptions(await optionInputsFor(bridge, record))
+}
+
+async function optionInputsFor(bridge: Bridge, record: SessionRecord): Promise<ConfigInputs> {
   // 档位词表按会话**当前**路由查，而不是部署的初始 provider —— 换过 provider 之后
   // 两者会分叉，用旧的会给出一份别人的词表。
   const provider = record.handle.controls.provider() ?? bridge.config.provider
@@ -63,12 +68,12 @@ export async function optionsFor(bridge: Bridge, record: SessionRecord): Promise
     provider === undefined || model === undefined
       ? undefined
       : await bridge.port.reasoningEfforts(provider, model)
-  return configOptions({
+  return {
     controls: record.handle.controls,
     routes: await routesFor(bridge),
     sandboxModes: bridge.port.sandboxModes,
     ...(reasoning === undefined ? {} : { reasoning }),
-  })
+  }
 }
 
 /**
@@ -84,7 +89,8 @@ export async function handleSetConfigOption(
   const record = bridge.table.get(params.sessionId as SessionId)
   if (record === undefined) throw invalidParams(`unknown session: ${params.sessionId}`)
 
-  const current = await optionsFor(bridge, record)
+  const inputs = await optionInputsFor(bridge, record)
+  const current = configOptions(inputs)
   const target = current.find((option) => option.id === params.configId)
   // 未 advertise 的配置项一律拒绝。静默接受会让客户端以为设置生效了。
   if (target === undefined) throw invalidParams(`unknown config option: ${params.configId}`)
@@ -114,7 +120,7 @@ export async function handleSetConfigOption(
       break
     }
     case REASONING_OPTION:
-      record.handle.controls.setReasoningEffort(value)
+      record.handle.controls.setReasoningEffort(value === providerDefaultValue(inputs.reasoning) ? undefined : value)
       break
     case SANDBOX_OPTION:
       record.handle.controls.setSandboxMode(value)

@@ -67,9 +67,9 @@ export interface SessionControls {
    */
   reasoningEffort(): string | undefined
   /**
-   * 切推理档位；与切模型同样在下一步进入 prompt 装配时生效。
+   * 切推理档位；undefined 清空会话覆盖，下一次请求用提供方默认行为。
    */
-  setReasoningEffort(effort: string): void
+  setReasoningEffort(effort: string | undefined): void
   /** 当前有效沙箱模式（会话覆盖 ?? 部署默认）；组合没挂 sandboxPolicy 时 undefined */
   sandboxMode(): string | undefined
   /** 切沙箱模式；没挂 sandboxPolicy 时为 no-op */

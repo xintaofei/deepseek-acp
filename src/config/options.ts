@@ -176,6 +176,16 @@ export interface ConfigInputs {
   readonly platform?: NodeJS.Platform
 }
 
+export function providerDefaultValue(reasoning: ConfigInputs['reasoning']): string | undefined {
+  if (reasoning === undefined || reasoning.defaultEffort !== undefined || reasoning.efforts.length < 2) {
+    return undefined
+  }
+  // 提供方自己定义档位 ID，保留它给出的全部取值。
+  let value = 'provider-default'
+  while (reasoning.efforts.some((effort) => effort.id === value)) value += '-'
+  return value
+}
+
 /**
  * 按当前会话状态组装配置项。
  *
@@ -228,17 +238,20 @@ export function configOptions(inputs: ConfigInputs): SessionConfigOption[] {
     // 会话没显式选过就显示适配器的默认档——这与实际发送的是同一个值：
     // `LlmRuntime` 也按 `requested ?? defaultEffort` 物化。同源，但那是运行时的
     // 行为而非本模块能保证的事，所以有用例钉着（TC-REASON-02）。
-    const current = inputs.controls.reasoningEffort() ?? inputs.reasoning?.defaultEffort
-    // 当前值必须在词表里，否则客户端会拿到一个选不中的下拉框。
-    if (current !== undefined && efforts.some((effort) => effort.id === current)) {
+    const providerDefault = providerDefaultValue(inputs.reasoning)
+    const current = inputs.controls.reasoningEffort() ?? inputs.reasoning?.defaultEffort ?? providerDefault
+    // 没有默认档时，请求会省略档位。给它单独的选项，避免界面显示一个并未发送的值。
+    if (current !== undefined && (current === providerDefault || efforts.some((effort) => effort.id === current))) {
+      const choices = efforts.map((effort) => effortChoice(effort))
+      if (providerDefault !== undefined) choices.unshift({ value: providerDefault, name: '由提供方决定' })
       options.push({
         type: 'select',
         id: REASONING_OPTION,
         name: '推理档位',
         description: '越高越慢越费 token，难题更稳',
-        category: 'model',
+        category: 'thought_level',
         currentValue: current,
-        options: efforts.map((effort) => effortChoice(effort)),
+        options: choices,
       })
     }
   }
