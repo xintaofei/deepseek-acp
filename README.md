@@ -16,43 +16,6 @@ and can be configured as shown below, but has not yet been validated feature by 
 
 ---
 
-## DSH 0.2 compatibility
-
-This branch pins every DSH package to **0.2.2-rc.5** and requires **Node 22.19.0 or later**.
-Upstream DSH itself has required Node 24.9 since 0.2.1-alpha.4; the extra floor comes from parts
-this adapter does not load (the OAR subagent library and the CLI scripts). This project keeps Node 22
-in its CI matrix, so a DSH upgrade that breaks Node 22 fails here first.
-It still assembles DSH inside the ACP process; it does not launch the official desktop runtime.
-New sessions use the native v4 log. The upstream persistence backend can restore supported v3
-logs and publishes a v4 successor while retaining the original v3 bytes. Migration support is
-subject to the upstream format policy; an old harness cannot read the resulting v4 log.
-
-The existing editor features remain in scope: streaming, tool cards, approval, questions,
-session restore/fork, model selection, MCP, and provider configuration. ACP provider edits are
-stored in `$DSH_HOME/deepseek-acp/settings.yaml` (secrets go to the credential store), without
-modifying native DSH profiles. The previous location, `$DSH_HOME/settings.yaml`, is no longer
-written: upstream DSH 0.2 renames that file to `settings.yaml.imported` when it starts. Routes
-configured with 0.9.0 are imported read-only from either file until the first edit. The official
-API-key route remains deployment-owned and read-only in the ACP provider editor. A host can still
-override it with an `llm-deepseek` section (for example `llm-deepseek.models` to replace the two
-built-in models in the picker), read from the first of `$DSH_HOME/deepseek-acp/settings.yaml`,
-`$DSH_HOME/settings.yaml`, `settings.yaml.imported` that has one and layered over the built-in
-configuration as 0.9.0 did; an invalid section is ignored with a warning on stderr.
-
-The first `session/list` after upgrading has to read each old v3 log once, and on DSH 0.2 each of
-those reads scans the whole session root. The list answers within about two seconds, so sessions
-that were not read in time show up without a title. The reads continue in the background and are
-saved to an index next to the session root, so later lists have every title and do not reopen
-unchanged logs.
-
-**A newer kernel does not mean all official features are exposed.** Native background jobs,
-child-agent delegation, official account login/search, and the desktop extension composition are
-not added by this upgrade. Question forms also depend on client support: the permission-button
-fallback supports choices, but cannot collect free text. This scope preserves the project's
-existing composition boundaries.
-
----
-
 ## Why This Exists
 
 DeepSeek Harness ships with an ACP server (`@deepseek-ai/dsh-acp`), but it is designed for

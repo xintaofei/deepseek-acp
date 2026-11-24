@@ -14,35 +14,6 @@
 
 ---
 
-## DSH 0.2 兼容范围
-
-本分支将全部 DSH 包精确锁定到 **0.2.2-rc.5**，要求 **Node ≥ 22.19.0**。
-上游 DSH 自 0.2.1-alpha.4 起要求 Node 24.9，那条下限来自本适配器不加载的部分（OAR 子代理库与
-CLI 脚本）。本项目的 CI 仍在 Node 22 上跑全量用例，哪次 DSH 升级弄坏了 Node 22，会先在这里变红。
-仍由 ACP 适配器在进程内组装 DSH，并未改为启动官方桌面运行时。
-新会话写入原生 v4 日志；上游持久化后端可恢复其迁移策略支持的 v3 日志，
-生成 v4 后继文件并保留原始 v3 字节。旧内核不能读取生成的 v4 日志。
-
-原有编辑器功能仍在范围内：流式输出、工具卡片、审批、提问、会话恢复与分叉、
-模型选择、MCP 和 provider 配置。ACP provider 配置写在
-`$DSH_HOME/deepseek-acp/settings.yaml`（密钥进凭据存储），不修改原生 DSH profile。
-原来的 `$DSH_HOME/settings.yaml` 不再写入：上游 DSH 0.2 启动时会把它改名成
-`settings.yaml.imported`。0.9.0 配好的路由会从这两个文件之一只读导入，直到第一次修改。
-官方 API Key 路由由部署配置管理，在 ACP provider 编辑器内只读。宿主仍可用 `llm-deepseek`
-段覆盖它（例如用 `llm-deepseek.models` 换掉选择器里的两个内置模型）：依次在
-`$DSH_HOME/deepseek-acp/settings.yaml`、`$DSH_HOME/settings.yaml`、`settings.yaml.imported`
-里找第一份带这一段的，像 0.9.0 一样叠在内置配置上；段不合法时忽略并在 stderr 留一行 warn。
-
-升级后的第一次 `session/list` 要把每条 v3 旧日志读一遍，而在 DSH 0.2 上每读一条都要
-扫一遍整个会话根。列表在约两秒内先应答，来不及读的会话这一次没有标题；剩下的在后台
-读完，存进会话根旁边的索引，之后的列表标题齐全，没变过的日志也不再重读。
-
-**内核升级不等于接入官方全部能力。** 本次没有新增原生后台任务、子 agent 委派、
-官方账号登录与搜索、桌面扩展组合。表单提问也取决于客户端能力：授权按钮降级
-支持选项题，不能收集自由文本。此次升级保留项目现有的组合边界。
-
----
-
 ## 为什么存在
 
 DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的定位是
