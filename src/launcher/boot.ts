@@ -56,6 +56,7 @@ import { SessionListIndex } from '../session/list-index.js'
 import { ensurePiAi } from '../composition/pi-ai.js'
 import { mountNativeShell } from '../composition/shell.js'
 import * as acpBridge from '../index.js'
+import { EXTRA_PLUGINS_ENV, mountExtraPlugins, parseExtraPlugins } from './extra-plugins.js'
 import { CREDENTIAL_REF } from './setup.js'
 import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
 
@@ -631,6 +632,26 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   // 理由与判据见 `src/composition/pi-ai.ts`。
   if (ctx.acpSettings.mentionsPiAi()) {
     await ensurePiAi(ctx)
+  }
+  // ── 第三方 Cordis 插件（DEEPSEEK_ACP_PLUGINS）─────────────────────────
+  //
+  // 位置是这条接线的全部要点，两头都有硬理由：
+  //
+  // * **晚于 `composeAgent`**：这类插件普遍声明 `inject: ['systemPrompt', 'tools']`
+  //   （例如只做运行时提示词注入的 dsh-purge），服务没注册就挂载会直接失败。
+  // * **早于 `acpBridge`**：桥在会话建立时读的是当下的提示词组装与工具表，晚一步
+  //   挂上的插件这一整个进程都不会生效——而进程是按「一个客户端连接」重启的，
+  //   用户看到的就是「改了配置没反应」。
+  //
+  // 挂载本身失败不抛：见 `extra-plugins.ts` 的第 2 条约束。
+  const extra = parseExtraPlugins(env[EXTRA_PLUGINS_ENV])
+  for (const problem of extra.errors) ctx.logger('plugins').warn('%s', problem)
+  if (extra.rows.length > 0) {
+    const plugins = ctx.logger('plugins')
+    const mounted = await mountExtraPlugins(ctx, extra.rows, (message) => plugins.warn('%s', message))
+    // 成功也留一行：用户配完环境变量后要能在编辑器日志面板里确认「到底挂上没有」，
+    // 而返回值只到得了调用方。
+    if (mounted.mounted.length > 0) plugins.info('%d 个外部插件已挂载：%s', mounted.mounted.length, mounted.mounted.join(', '))
   }
   await ctx.plugin(acpBridge, { ...readEnv(env), onClosed } as never)
   return ctx

@@ -294,6 +294,27 @@ could not mount the server.
 Logs are written to `$DSH_HOME/sessions` (`~/.dsh/sessions`) by default. Override the location with
 `DEEPSEEK_ACP_SESSIONS_ROOT`. Session restore, listing, and titles all read from this directory.
 
+### Third-party plugins
+
+The composition is hard-coded, but it exposes one mount point: `DEEPSEEK_ACP_PLUGINS`
+takes a JSON array of `{ "name": <specifier>, "config"?: <Config handed to ctx.plugin> }`.
+
+```sh
+export DEEPSEEK_ACP_PLUGINS='[{"name":"my-dsh-plugin"},{"name":"/abs/path/to/plugin.mjs","config":{}}]'
+```
+
+`name` goes to `import()` — a package name, an absolute path, or a `file:` URL. A package
+name is resolved from this package's own install location, not from the working directory, so
+install the plugin next to `deepseek-acp` (e.g. in the same global `node_modules`) or use a path.
+Only list modules you trust: they run in-process with the agent's full permissions.
+
+The mount point sits after `composeAgent` and before `acpBridge`, so a plugin declaring
+`inject: ['systemPrompt', 'tools']` gets its services and affects every session in this process.
+
+Two boundaries: bytes written to stdout *during* the mount window are redirected to stderr
+(AC-G1) — writes that land outside it are not covered; a row that fails to load leaves one
+line on stderr and never blocks startup.
+
 ---
 
 ## Acknowledgments
