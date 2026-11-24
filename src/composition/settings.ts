@@ -27,6 +27,15 @@
  * 后者是它被上游挪走之后的样子。**只读不写**：那两个文件归上游与旧版本所有，
  * 降级回 0.9.0 时它们还得原样可用。第一次经 `providers/*` 修改时，导入的内容连同
  * 这次修改一起落进我们自己的文档，此后旧文档就不再被读。
+ *
+ * ## `llm-deepseek` 段：官方路由的覆盖层
+ *
+ * 0.9.0 挂着上游的 `dsh-settings-file`，`$DSH_HOME/settings.yaml` 里的 `llm-deepseek`
+ * 段由上游适配器自己叠在部署配置上（宿主常用它换掉模型目录）。0.10.0 换成本文档后
+ * 这一层没人读了，段被静默忽略（issue #13）。{@link readDeepSeekSection} 把它接回来：
+ * 按同样的顺序（自己的文档、`settings.yaml`、`.imported`）取**第一份带这一段**的
+ * 文档，同样只读。与 pi-ai 段不同，自己的文档存在并不让旧文档失效：本适配器从不
+ * 写这一段，宿主继续写的那份必须一直生效。
  * @module
  */
 
@@ -39,8 +48,11 @@ import Schema from '@deepseek-ai/schemastery'
 import { parse, stringify } from 'yaml'
 import { redactSecrets } from '@deepseek-ai/dsh-settings'
 
-/** 文档里唯一可写、也唯一会被读出的段：pi-ai 的插件配置。 */
+/** 文档里唯一可写的段：pi-ai 的插件配置。 */
 const PI_AI_NS = 'llm-pi-ai'
+
+/** 只读的官方路由覆盖层，见模块头「`llm-deepseek` 段」。 */
+export const DEEPSEEK_NS = 'llm-deepseek'
 
 /**
  * pi-ai 1.x 改了名的内置 provider：旧 id → 新 id。
@@ -77,7 +89,13 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
-function merge(target: Record<string, unknown>, patch: Record<string, unknown>): void {
+/**
+ * 把 `patch` 叠到 `target` 上（就地修改）：映射逐层合并，其余值（含数组）整体替换。
+ * 与上游设置层的 `mergeLayers` 同一规则，0.9.0 叠 `llm-deepseek` 段时用的就是它。
+ * @param target - 被修改的下层
+ * @param patch - 上层
+ */
+export function merge(target: Record<string, unknown>, patch: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(patch)) {
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
       const child = record(target[key])
@@ -120,7 +138,44 @@ function upgradeLegacySection(section: Record<string, unknown>): Record<string, 
   return next
 }
 
-/** 只装 pi-ai 段、与上游 profile 互不相干的设置文档。 */
+/**
+ * 设置文档的路径：缺省值集中在此，{@link AcpSettings} 与 {@link readDeepSeekSection} 共用。
+ * @param config - 用例给的路径；生产不给
+ */
+function documentPaths(config: AcpSettingsConfig): { documentPath: string; legacyPaths: readonly string[] } {
+  const home = resolveDshHome()
+  return {
+    documentPath: config.path ?? join(home, 'deepseek-acp', 'settings.yaml'),
+    legacyPaths: config.legacy ?? [join(home, 'settings.yaml'), join(home, 'settings.yaml.imported')],
+  }
+}
+
+/**
+ * 读 `llm-deepseek` 段：依次看自己的文档与旧文档，取第一份带这一段的。
+ *
+ * 读不懂的文档跳过并经 `warn` 留一行，不抛：这一段只是覆盖层，坏了也该让官方
+ * 路由按部署配置起来，而不是把整个适配器拉下线。
+ * @param config - 文档路径，缺省同 {@link AcpSettings}
+ * @param warn - 诊断出口
+ * @returns 段与它所在的文件；都没有时 undefined
+ */
+export function readDeepSeekSection(
+  config: AcpSettingsConfig = {},
+  warn: (message: string) => void = () => {},
+): { section: Record<string, unknown>; path: string } | undefined {
+  const { documentPath, legacyPaths } = documentPaths(config)
+  for (const path of [documentPath, ...legacyPaths]) {
+    try {
+      const section = readDocument(path)?.[DEEPSEEK_NS]
+      if (section !== undefined) return { section: record(section), path }
+    } catch (error) {
+      warn(`skipping unreadable ${DEEPSEEK_NS} settings in ${path}: ${String(error)}`)
+    }
+  }
+  return undefined
+}
+
+/** 只写 pi-ai 段、与上游 profile 互不相干的设置文档。 */
 export class AcpSettings extends Service {
   static inject = ['loader']
   // `legacy` 不能写成裸的 `Schema.array`：schemastery 会把缺省值补成 `[]`，
@@ -138,9 +193,9 @@ export class AcpSettings extends Service {
 
   constructor(ctx: Context, config: AcpSettingsConfig = {}) {
     super(ctx, 'acpSettings')
-    const home = resolveDshHome()
-    this.documentPath = config.path ?? join(home, 'deepseek-acp', 'settings.yaml')
-    this.legacyPaths = config.legacy ?? [join(home, 'settings.yaml'), join(home, 'settings.yaml.imported')]
+    const { documentPath, legacyPaths } = documentPaths(config)
+    this.documentPath = documentPath
+    this.legacyPaths = legacyPaths
   }
 
   /**

@@ -28,7 +28,10 @@ CLI 脚本）。本项目的 CI 仍在 Node 22 上跑全量用例，哪次 DSH �
 `$DSH_HOME/deepseek-acp/settings.yaml`（密钥进凭据存储），不修改原生 DSH profile。
 原来的 `$DSH_HOME/settings.yaml` 不再写入：上游 DSH 0.2 启动时会把它改名成
 `settings.yaml.imported`。0.9.0 配好的路由会从这两个文件之一只读导入，直到第一次修改。
-官方 API Key 路由由部署配置管理，在 ACP provider 编辑器内只读。
+官方 API Key 路由由部署配置管理，在 ACP provider 编辑器内只读。宿主仍可用 `llm-deepseek`
+段覆盖它（例如用 `llm-deepseek.models` 换掉选择器里的两个内置模型）：依次在
+`$DSH_HOME/deepseek-acp/settings.yaml`、`$DSH_HOME/settings.yaml`、`settings.yaml.imported`
+里找第一份带这一段的，像 0.9.0 一样叠在内置配置上；段不合法时忽略并在 stderr 留一行 warn。
 
 升级后的第一次 `session/list` 要把每条 v3 旧日志读一遍，而在 DSH 0.2 上每读一条都要
 扫一遍整个会话根。列表在约两秒内先应答，来不及读的会话这一次没有标题；剩下的在后台

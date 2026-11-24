@@ -33,7 +33,11 @@ stored in `$DSH_HOME/deepseek-acp/settings.yaml` (secrets go to the credential s
 modifying native DSH profiles. The previous location, `$DSH_HOME/settings.yaml`, is no longer
 written: upstream DSH 0.2 renames that file to `settings.yaml.imported` when it starts. Routes
 configured with 0.9.0 are imported read-only from either file until the first edit. The official
-API-key route remains deployment-owned and read-only in the ACP provider editor.
+API-key route remains deployment-owned and read-only in the ACP provider editor. A host can still
+override it with an `llm-deepseek` section (for example `llm-deepseek.models` to replace the two
+built-in models in the picker), read from the first of `$DSH_HOME/deepseek-acp/settings.yaml`,
+`$DSH_HOME/settings.yaml`, `settings.yaml.imported` that has one and layered over the built-in
+configuration as 0.9.0 did; an invalid section is ignored with a warning on stderr.
 
 The first `session/list` after upgrading has to read each old v3 log once, and on DSH 0.2 each of
 those reads scans the whole session root. The list answers within about two seconds, so sessions

@@ -15,8 +15,17 @@ import { Context } from '@deepseek-ai/cordis'
 import LlmService from '@deepseek-ai/dsh-llm'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { DEEPSEEK_MODELS, DEEPSEEK_PROVIDER_CONFIG, DEFAULT_MODEL, DEFAULT_PROVIDER } from '../src/launcher/boot.js'
+import {
+  DEEPSEEK_MODELS,
+  DEEPSEEK_PROVIDER_CONFIG,
+  DEFAULT_MODEL,
+  DEFAULT_PROVIDER,
+  mountDeepSeekProvider,
+} from '../src/launcher/boot.js'
+import { realTempDir } from './temp-dir.js'
 
 /** 官方已下线、但仍能调通的旧 id。摆进选择器就是误导，见 `DEEPSEEK_MODELS`。 */
 const RETIRED = ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']
@@ -135,5 +144,72 @@ describe('TC-MODEL-03 覆盖不丢上游的字段', () => {
 
   it('每条都有中文说明 —— 这是还留着覆盖的唯一理由', () => {
     for (const model of DEEPSEEK_MODELS) expect(model.description, model.id).toMatch(/[\u4e00-\u9fff]/)
+  })
+})
+
+describe('TC-MODEL-04 设置文档的 llm-deepseek 段叠在部署配置上（issue #13）', () => {
+  /** 一个家目录：自己的文档与旧文档各自可选。 */
+  function home(files: { own?: string; legacy?: string }): { path: string; legacy: string[] } {
+    const root = realTempDir('dsacp-deepseek-section-')
+    const path = join(root, 'deepseek-acp', 'settings.yaml')
+    const legacy = join(root, 'settings.yaml')
+    if (files.own !== undefined) {
+      mkdirSync(join(root, 'deepseek-acp'), { recursive: true })
+      writeFileSync(path, files.own)
+    }
+    if (files.legacy !== undefined) writeFileSync(legacy, files.legacy)
+    return { path, legacy: [legacy, join(root, 'settings.yaml.imported')] }
+  }
+
+  /** 与 {@link llmOnly} 同样的最小组合，官方路由经 `mountDeepSeekProvider` 挂。 */
+  async function mounted(settings: { path: string; legacy: string[] }): Promise<{ ctx: Context; from?: string }> {
+    const ctx = new Context()
+    ctx.provide('launchEnvironment', createLaunchEnvironmentSnapshot([
+      { source: 'process', values: { DEEPSEEK_API_KEY: 'sk-offline-catalog-fixture', DEEPSEEK_BASE_URL: OFFLINE_BASE_URL } },
+    ]))
+    await ctx.plugin(LlmService)
+    const from = await mountDeepSeekProvider(ctx, settings)
+    return { ctx, ...(from === undefined ? {} : { from }) }
+  }
+
+  const CUSTOM = 'llm-deepseek:\n  models:\n    - id: my/model\n      name: My\n    - id: my/other\n      name: Other\n'
+
+  it('宿主写在 $DSH_HOME/settings.yaml 的模型目录换掉内置两项', async () => {
+    const settings = home({ legacy: CUSTOM })
+    const { ctx, from } = await mounted(settings)
+    expect(from).toBe(settings.legacy[0])
+    const models = await ctx.llm.listModels(DEFAULT_PROVIDER)
+    expect(models.map((m) => [m.id, m.name])).toEqual([['my/model', 'My'], ['my/other', 'Other']])
+  })
+
+  it('只换段里写了的键：其余仍是部署配置，部署配置本身不被改动', async () => {
+    const before = structuredClone(DEEPSEEK_PROVIDER_CONFIG)
+    const { ctx } = await mounted(home({ legacy: CUSTOM }))
+    const reasoning = await ctx.llm.resolveModelInfo(DEFAULT_PROVIDER, 'my/model')
+    expect(reasoning.reasoning?.defaultEffort).toBe(DEEPSEEK_PROVIDER_CONFIG.reasoningEffort)
+    expect(DEEPSEEK_PROVIDER_CONFIG).toEqual(before)
+  })
+
+  it('自己的文档有这一段时用它；没有这一段时不挡住旧文档', async () => {
+    const own = 'llm-deepseek:\n  models:\n    - id: own/model\n'
+    const first = await mounted(home({ own, legacy: CUSTOM }))
+    expect((await first.ctx.llm.listModels(DEFAULT_PROVIDER)).map((m) => m.id)).toEqual(['own/model'])
+    // 自己的文档只有 pi-ai 段（issue 里的绕法）：宿主写的旧文档照样生效。
+    const second = await mounted(home({ own: 'llm-pi-ai: {}\n', legacy: CUSTOM }))
+    expect((await second.ctx.llm.listModels(DEFAULT_PROVIDER)).map((m) => m.id)).toEqual(['my/model', 'my/other'])
+  })
+
+  it('没有这一段时就是部署配置', async () => {
+    const { ctx, from } = await mounted(home({ legacy: 'llm-pi-ai: {}\n' }))
+    expect(from).toBeUndefined()
+    expect((await ctx.llm.listModels(DEFAULT_PROVIDER)).map((m) => m.id)).toEqual(DEEPSEEK_MODELS.map((m) => m.id))
+  })
+
+  it('段不合法、文档读不懂时都退回部署配置，不把官方路由拉下线', async () => {
+    for (const legacy of ['llm-deepseek:\n  models:\n    - id: a\n    - id: a\n', 'llm-deepseek: [\n']) {
+      const { ctx, from } = await mounted(home({ legacy }))
+      expect(from, legacy).toBeUndefined()
+      expect((await ctx.llm.listModels(DEFAULT_PROVIDER)).map((m) => m.id), legacy).toEqual(DEEPSEEK_MODELS.map((m) => m.id))
+    }
   })
 })
