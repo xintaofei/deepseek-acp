@@ -427,11 +427,15 @@ export function createInProcessPort(ctx: Context): HarnessPort {
         // 会整条消失，看起来像功能坏了。
         windowNow()
       },
-      setReasoningEffort: (effort: string) => {
+      setReasoningEffort: (effort: string | undefined) => {
         const current = agent.model.current()
         // 没有选择就无处安放（缺 provider 的会话，档位项也不会 advertise）。
         if (current === undefined) return
-        agent.model.select({ provider: current.provider, model: current.model, reasoningEffort: ReasoningEffortId(effort) })
+        agent.model.select({
+          provider: current.provider,
+          model: current.model,
+          ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
+        })
       },
       sandboxMode: () => {
         const policy = ctx.get('sandboxPolicy')

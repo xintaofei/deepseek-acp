@@ -200,7 +200,7 @@ export class FakeLlmAdapter extends LlmAdapter {
   }
 
   /** 适配器报告的默认档位。 */
-  defaultEffort = 'high'
+  defaultEffort: string | undefined = 'high'
 
   override async resolveModel(provider: string, model: string) {
     const efforts = this.reasoningByModel[model] ?? []
@@ -220,9 +220,11 @@ export class FakeLlmAdapter extends LlmAdapter {
         : {
             reasoning: {
               efforts: efforts.map((id) => ({ id: id as never, name: id.toUpperCase() })),
-              defaultEffort: (efforts.includes(this.defaultEffort)
-                ? this.defaultEffort
-                : efforts[0]) as never,
+              ...(this.defaultEffort === undefined ? {} : {
+                defaultEffort: (efforts.includes(this.defaultEffort)
+                  ? this.defaultEffort
+                  : efforts[0]) as never,
+              }),
             },
           }),
     }
