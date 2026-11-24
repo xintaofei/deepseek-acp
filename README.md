@@ -18,7 +18,7 @@ and can be configured as shown below, but has not yet been validated feature by 
 
 ## DSH 0.2 compatibility
 
-This branch pins every DSH package to **0.2.2-rc.3** and requires **Node 22.19.0 or later**.
+This branch pins every DSH package to **0.2.2-rc.5** and requires **Node 22.19.0 or later**.
 Upstream DSH itself has required Node 24.9 since 0.2.1-alpha.4; the extra floor comes from parts
 this adapter does not load (the OAR subagent library and the CLI scripts). This project keeps Node 22
 in its CI matrix, so a DSH upgrade that breaks Node 22 fails here first.
