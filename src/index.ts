@@ -27,6 +27,7 @@ import { askUser } from './answerers/ask.js'
 import { clientTextReader } from './answerers/fs-read.js'
 import type { Bridge, AcpBridgeConfig } from './bridge.js'
 import { mapEvent } from './mapping/updates.js'
+import { contentRefusal, isContentRefusalError } from './mapping/refusal-notice.js'
 import { createInProcessPort } from './port/in-process.js'
 import { handleCancel } from './protocol/session-cancel.js'
 import { handleCloseSession } from './protocol/session-close.js'
@@ -175,7 +176,9 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     const inflight = record.inflight
     if (inflight === undefined) return
     if (event.type === 'turn/end' && (inflight.anyTurn || inflight.turn === event.data.turn)) {
-      if (event.data.reason.kind === 'error') {
+      // 内容安全拒答不算失败：说明已经由上面的 `turn/end` 映射写进转录，这一轮按正常
+      // 结束等 idle 结算（`end_turn`）。理由见 `mapping/refusal-notice.ts`。
+      if (event.data.reason.kind === 'error' && contentRefusal(event.data.reason) === undefined) {
         // 模型失败立刻以 prompt 错误浮现；普通结束等 whole-agent idle。
         record.inflight = undefined
         inflight.reject(internalError(`turn failed: ${event.data.reason.error.message}`))
@@ -220,6 +223,8 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     const record = table.ownedBy(agent)
     const inflight = record?.inflight
     if (record === undefined || inflight === undefined || inflight.turn === turn) return
+    // 拒答交给随后的 `turn/end`：说明由它写进转录，prompt 照常结算（见 refusal-notice.ts）。
+    if (isContentRefusalError(error)) return
     record.inflight = undefined
     const detail = error instanceof Error ? error.message : String(error)
     inflight.reject(internalError(`turn failed: ${detail}`))

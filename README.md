@@ -117,6 +117,14 @@ the reply shows a line such as "模型请求失败：…，N 秒后第 k/5 次�
 effect immediately. Authentication failures, exhausted balance, and invalid requests are not
 retried: every retry is a billed request, and these would fail again.
 
+**Content refusals.** When DeepSeek's content safety review refuses to answer (for example, a
+blocked image), the request is not retried. The turn ends normally, and the reply ends with a line
+starting with "模型拒绝回答" that includes DeepSeek's explanation when one is provided. The line is
+also restored by `session/load`. The refused reply is not added to the model context, but your
+message stays, so if your message caused the refusal, later turns may be refused too. Rephrase it
+or start a new session. The prompt ends with `end_turn` instead of ACP's `refusal`, because some
+clients (Zed) remove the prompt from the transcript on `refusal` while the model would still see it.
+
 **Sandboxing.** Commands and file operations share the same boundary. The default mode is
 `workspace-write`, with writable roots set to `{session cwd, system temporary directory}`. Shell
 and file tools use the same policy definition. Boundary crossings are rejected, and the model can

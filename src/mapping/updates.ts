@@ -25,6 +25,7 @@ import { assistantMessageId } from '../session/fork-point.js'
 import { assistantStreamUpdates } from './assistant-stream.js'
 import { todosToPlan } from './plan.js'
 import { retryNoticeText } from './retry-notice.js'
+import { contentRefusal, refusalNoticeText } from './refusal-notice.js'
 
 /** 映射一条事件所需的会话上下文。 */
 export interface MappingContext {
@@ -145,6 +146,18 @@ export function mapEvent(event: SessionEvent, context: MappingContext = {}): Ses
           content: { type: 'text', text: retryNoticeText(event.data) },
         },
       ]
+    }
+
+    case 'turn/end': {
+      // 只有内容安全拒答在这里出文字，其余结束原因不出更新（失败照旧走 prompt 错误）。
+      // 实时与重放共用，理由与结算方式见 `./refusal-notice.ts`。
+      //
+      // 不带 `messageId`：这条事件只有 turn、没有 step，编不出与那半句相同的
+      // `<turn>:<step>`；另编一个又会被当成新气泡。不带时客户端把它接在当前那条助手
+      // 消息后面（`command/done` 同样不带），实时与重放的序列相同，接法也就相同。
+      const refusal = contentRefusal(event.data.reason)
+      if (refusal === undefined) return []
+      return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: refusalNoticeText(refusal) } }]
     }
 
     // ── 上下文压缩 ────────────────────────────────────────────────────
