@@ -7,8 +7,11 @@
  * 环境变量：
  *   MCP_TOOL_NAME  暴露的工具名，默认 `ping`；用于验证两会话挂不同 server 的隔离
  *   MCP_FAIL       置位则启动即退出，用于验证 `failOnStartupError`
+ *   MCP_HANG       置位则 `tools/call` 永不应答，模拟卡死 / 等真人的工具
+ *   MCP_CANCEL_LOG 收到 `notifications/cancelled` 时把 requestId 追加写入该文件
  */
 
+import { appendFileSync } from 'node:fs'
 import process from 'node:process'
 import { createInterface } from 'node:readline'
 
@@ -36,7 +39,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     return
   }
   // 通知没有 id，也不该有应答。
-  if (message.id === undefined) return
+  if (message.id === undefined) {
+    if (message.method === 'notifications/cancelled' && process.env.MCP_CANCEL_LOG !== undefined) {
+      appendFileSync(process.env.MCP_CANCEL_LOG, `${String(message.params?.requestId)}\n`)
+    }
+    return
+  }
 
   switch (message.method) {
     case 'initialize':
@@ -59,6 +67,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       })
       return
     case 'tools/call':
+      if (process.env.MCP_HANG !== undefined) return
       reply(message.id, {
         content: [{ type: 'text', text: `${TOOL}:${message.params?.arguments?.msg ?? ''}` }],
       })

@@ -9,6 +9,8 @@
  */
 
 import { fileURLToPath } from 'node:url'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import type { McpServer } from '@agentclientprotocol/sdk'
@@ -21,14 +23,27 @@ import { createHarness, waitFor } from './harness.js'
 
 const SERVER = fileURLToPath(new URL('./fixtures/mock-mcp-server.mjs', import.meta.url))
 
+/**
+ * 平台定时器能表达的最大延时（2^31-1）。这里写字面量而非 import
+ * `MAX_TIMER_DELAY_MS`：用例要独立于实现证明「给的就是上限」，引用同一个
+ * 常量就变成常量与自己相等，一点没测。
+ */
+const TIMER_CEILING_MS = 2_147_483_647
+
 /** 一条 stdio server 声明。 */
-const stdio = (name: string, toolName: string, fail = false): McpServer => ({
+const stdio = (
+  name: string,
+  toolName: string,
+  fail = false,
+  extraEnv: { name: string; value: string }[] = [],
+): McpServer => ({
   name,
   command: process.execPath,
   args: [SERVER],
   env: [
     { name: 'MCP_TOOL_NAME', value: toolName },
     ...(fail ? [{ name: 'MCP_FAIL', value: '1' }] : []),
+    ...extraEnv,
   ],
 })
 
@@ -123,6 +138,38 @@ describe('TC-MCP-08 MCP 工具可被调用，并呈现为标准工具卡片', ()
     const text = JSON.stringify(done?.['content'] ?? '')
     expect(text).toContain('echo_tool:hi-from-mcp')
     expect(done?.['status']).toBe('completed')
+    h.disposeBridge()
+  }, 30_000)
+})
+
+describe('TC-MCP-09 卡住的 MCP 调用由取消终结，而不是靠计时器', () => {
+  it('tools/call 永不应答时，session/cancel 结算该轮并把取消送达 server', async () => {
+    // 工具调用期限取的是定时器上限，计时器实际上不再兜底；这条用例钉住
+    // 替代它的那条路：用户点停止 → exec.signal → SDK 发 notifications/cancelled。
+    // 这条路一断，卡死的 server 就会把这一轮挂上约 24.8 天。
+    const h = await createHarness()
+    const cancelLog = join(mkdtempSync(join(tmpdir(), 'mcp-cancel-')), 'cancelled.log')
+    const { sessionId } = await h.acp.request('session/new', {
+      cwd: tmpdir(),
+      mcpServers: [stdio('alpha', 'hang_tool', false, [
+        { name: 'MCP_HANG', value: '1' },
+        { name: 'MCP_CANCEL_LOG', value: cancelLog },
+      ])],
+    })
+
+    const raw: Record<string, unknown>[] = []
+    h.onUpdate((u) => raw.push(u as Record<string, unknown>))
+    h.llm.toolCall = { id: 'm-hang', name: 'mcp__a1_alpha__hang_tool', args: JSON.stringify({ msg: 'x' }) }
+
+    const inflight = h.acp.request('session/prompt', {
+      sessionId: sessionId as never,
+      prompt: [{ type: 'text', text: '用一下那个工具' }],
+    })
+    await waitFor(() => raw.some((u) => u['sessionUpdate'] === 'tool_call'), 20_000, 'mcp call started')
+
+    await h.acp.notify('session/cancel', { sessionId: sessionId as never })
+    expect((await inflight).stopReason).toBe('cancelled')
+    await waitFor(() => existsSync(cancelLog) && readFileSync(cancelLog, 'utf8').trim().length > 0, 10_000, 'server saw cancel')
     h.disposeBridge()
   }, 30_000)
 })
@@ -255,8 +302,27 @@ describe('TC-MCP-07 不支持的传输显式拒绝', () => {
       serverName: 'a1_remote',
       url: 'https://example.com/mcp',
       headers: { 'X-Key': 'v' },
+      toolCallTimeoutMs: TIMER_CEILING_MS,
       failOnStartupError: true,
     })
+  })
+
+  it('两种传输都显式给出 toolCallTimeoutMs，值为定时器上限', () => {
+    // 漏掉这个字段不报错，只会静默退回 `dsh-mcp-client` 的 60 s 默认值，于是
+    // 一等人作答的 MCP 工具（codeg 的 `ask_user_question`、`wait_ms: 0` 的
+    // `get_delegation_status`）必然以 `Request timed out` 失败——卡片还开着，
+    // 模型已经收到超时，两边各看到一半真相。
+    //
+    // 断言写死 2^31-1 而不是 import 同一个常量：比常量与自己相等，等于没测。
+    // 这里要钉住的是「必须是定时器上限」这件事——写 60_000 是本缺陷，写
+    // 2^31 会溢出成 1 ms 并在每次调用上立刻超时，两种错法都该变红。
+    const cases = [
+      toMountSpec({ name: 'alpha', command: process.execPath, args: [], env: [] }, 1),
+      toMountSpec({ type: 'http', name: 'remote', url: 'https://example.com/mcp', headers: [] }, 1),
+    ]
+    for (const spec of cases) expect(spec.toolCallTimeoutMs).toBe(TIMER_CEILING_MS)
+    // 两种传输是两条独立分支，漏一条就是漏一半客户端。
+    expect(cases.map((spec) => spec.transport)).toEqual(['stdio', 'streamable-http'])
   })
 
   it('sse 与 acp 抛 UnsupportedMcpServer —— 静默跳过会让模型看不见工具且难查', () => {
