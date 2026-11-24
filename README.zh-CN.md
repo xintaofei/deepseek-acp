@@ -255,10 +255,12 @@ MCP 开着时，`codeg-mcp` 会作为 server 挂进来，模型看到的工具�
 每项形如 `{ "name": <说明符>, "config"?: <交给 ctx.plugin 的 Config> }`。
 
 ```sh
-export DEEPSEEK_ACP_PLUGINS='[{"name":"dsh-purge-community"}]'
+export DEEPSEEK_ACP_PLUGINS='[{"name":"my-dsh-plugin"},{"name":"/abs/path/to/plugin.mjs","config":{}}]'
 ```
 
-`name` 交给 `import()`——包名（从本包位置解析）、绝对路径或 `file:` URL。挂载点固定在
+`name` 交给 `import()`——包名、绝对路径或 `file:` URL。包名从**本包的安装位置**解析而不是
+工作目录，所以插件要装在 `deepseek-acp` 旁边（例如同一个全局 `node_modules`），否则写路径。
+只填你信任的模块：它们在 agent 进程内运行，权限与 agent 相同。挂载点固定在
 `acpBridge` 之前、`composeAgent` 之后，所以声明了 `inject: ['systemPrompt', 'tools']`
 的插件（例如只做运行时提示词注入的
 [dsh-purge](https://github.com/kingcharleslzy-ai/dsh-purge)）能拿到服务，也能影响本进程

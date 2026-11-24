@@ -37,7 +37,7 @@ describe('TC-PLUG-01 parseExtraPlugins 读得懂，也读得懂「没配」', ()
     expect(parsed.errors).toEqual([])
     expect(parsed.rows).toEqual([{ name: 'dsh-purge-community', config: { mode: 'light' } }, { name: 'plain' }])
     // `exactOptionalPropertyTypes` 下「没有 config」与「config 是 undefined」是
-    // 两回事，而 Cordis 里 `plugin(mod, undefined)` 与 `plugin(mod)` 也不等价。
+    // 两回事：行的形状要与类型声明一致。
     expect(Object.hasOwn(parsed.rows[1] as ExtraPluginRow, 'config')).toBe(false)
   })
 })
@@ -105,6 +105,30 @@ describe('TC-PLUG-03 真模块挂得上', () => {
     expect((globalThis as Record<string, unknown>)['__dsacpPlugCalls']).toBe(1)
     expect(warnings).toEqual([])
     await ctx.fiber.dispose()
+  })
+})
+
+describe('TC-PLUG-08 name 是裸绝对路径（不是 file: URL）也挂得上', () => {
+  it('绝对路径先转 file: URL 再 import —— Windows 上盘符不会被当成 URL scheme', async () => {
+    // POSIX 上 `import('/abs/x.mjs')` 不转也能过，这条在 Windows CI 上才真正有牙齿：
+    // 不转的话 `C:\\...` 以 ERR_UNSUPPORTED_ESM_URL_SCHEME 失败。
+    const dir = realTempDir('dsacp-plug-')
+    const file = join(dir, 'abs.mjs')
+    writeFileSync(
+      file,
+      'export const name = "tc-plug-abs"\nexport function apply() { globalThis.__dsacpPlugAbs = true }\n',
+      'utf8',
+    )
+    const ctx = new Context()
+    const warnings: string[] = []
+    try {
+      const result = await mountExtraPlugins(ctx, [{ name: file }], (message) => warnings.push(message))
+      expect(warnings).toEqual([])
+      expect(result.mounted).toEqual([file])
+      expect((globalThis as Record<string, unknown>)['__dsacpPlugAbs']).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 })
 

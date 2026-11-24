@@ -300,11 +300,13 @@ The composition is hard-coded, but it exposes one mount point: `DEEPSEEK_ACP_PLU
 takes a JSON array of `{ "name": <specifier>, "config"?: <Config handed to ctx.plugin> }`.
 
 ```sh
-export DEEPSEEK_ACP_PLUGINS='[{"name":"dsh-purge-community"}]'
+export DEEPSEEK_ACP_PLUGINS='[{"name":"my-dsh-plugin"},{"name":"/abs/path/to/plugin.mjs","config":{}}]'
 ```
 
-`name` goes to `import()` — a package name (resolved from this package), an absolute path,
-or a `file:` URL. The mount point sits after `composeAgent` and before `acpBridge`, so a
+`name` goes to `import()` — a package name, an absolute path, or a `file:` URL. A package
+name is resolved from this package's own install location, not from the working directory, so
+install the plugin next to `deepseek-acp` (e.g. in the same global `node_modules`) or use a path.
+Only list modules you trust: they run in-process with the agent's full permissions. The mount point sits after `composeAgent` and before `acpBridge`, so a
 plugin declaring `inject: ['systemPrompt', 'tools']` (for example the injection-only
 [dsh-purge](https://github.com/kingcharleslzy-ai/dsh-purge)) gets its services and affects
 every session in this process.

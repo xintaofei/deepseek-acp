@@ -24,6 +24,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { isAbsolute } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 /** 环境变量名。与 `DEEPSEEK_ACP_PROVIDER` / `_MODEL` / `_SESSIONS_ROOT` 同一族命名。 */
 export const EXTRA_PLUGINS_ENV = 'DEEPSEEK_ACP_PLUGINS'
@@ -76,6 +78,19 @@ function pluginOf(module: unknown): unknown {
 }
 
 /**
+ * 把 `name` 变成 `import()` 认得的说明符。
+ *
+ * 绝对路径必须先转成 `file:` URL：POSIX 上直接把 `/a/b.mjs` 交给动态 import 碰巧能用，
+ * Windows 上 `C:\\a\\b.mjs` 的盘符会被当成 URL scheme，以 `ERR_UNSUPPORTED_ESM_URL_SCHEME`
+ * 失败——而 README 承诺的正是「绝对路径」。包名与 `file:` URL 原样交出。
+ * @param name - 用户写的说明符
+ * @returns 交给 `import()` 的说明符
+ */
+function specifierOf(name: string): string {
+  return isAbsolute(name) ? pathToFileURL(name).href : name
+}
+
+/**
  * 解析 `DEEPSEEK_ACP_PLUGINS`。
  *
  * 逐项判定而不是「一项坏就全丢」：用户在一个数组里配了三个插件、第三个拼错时，
@@ -114,8 +129,9 @@ export function parseExtraPlugins(raw: string | undefined): ExtraPluginParse {
       return
     }
     // `config` 缺席时不给这个键：`exactOptionalPropertyTypes` 下「没有」和「是
-    // undefined」是两回事，而 `ctx.plugin(mod, undefined)` 与 `ctx.plugin(mod)`
-    // 在 Cordis 里也不是同一条路径。
+    // undefined」是两回事，`{ config: undefined }` 这种形状类型上就不该出现。
+    // （Cordis 4.1 的 `ctx.plugin(mod)` 与 `ctx.plugin(mod, undefined)` 走的是同一条
+    // 路径，挂载时传 `row.config` 不会因此改变行为。）
     rows.push(Object.hasOwn(record, 'config') ? { name: name.trim(), config: record['config'] } : { name: name.trim() })
   })
   return { rows, errors }
@@ -175,7 +191,7 @@ export async function mountExtraPlugins(
       // 保护范围就是这一整段：import 会执行模块顶层代码，apply 会执行插件的装配。
       // 两者都是第三方代码，都可能 `console.log`。
       const fiber = await withStdoutToStderr(async () => {
-        const module: unknown = await import(row.name)
+        const module: unknown = await import(specifierOf(row.name))
         return await ctx.plugin(pluginOf(module) as never, row.config as never)
       })
       const missing = Object.keys(fiber.inject).filter((service) => ctx.get(service) === undefined)
