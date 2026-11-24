@@ -51,7 +51,7 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import { composeLsp, discoverLspServers, type LspServerSpec } from '../composition/lsp.js'
-import { AcpSettings } from '../composition/settings.js'
+import { AcpSettings, DEEPSEEK_NS, merge, readDeepSeekSection, type AcpSettingsConfig } from '../composition/settings.js'
 import { SessionListIndex } from '../session/list-index.js'
 import { ensurePiAi } from '../composition/pi-ai.js'
 import { mountNativeShell } from '../composition/shell.js'
@@ -265,6 +265,37 @@ export const DEEPSEEK_PROVIDER_CONFIG = {
   models: DEEPSEEK_MODELS,
   retryPolicy: DEEPSEEK_RETRY_POLICY,
 } as const
+
+/**
+ * 挂官方路由：部署配置 {@link DEEPSEEK_PROVIDER_CONFIG}，叠上设置文档里的
+ * `llm-deepseek` 段（规则与查找顺序见 `src/composition/settings.ts`）。
+ *
+ * 这是 0.9.0 的行为：宿主写 `llm-deepseek.models` 就能换掉选择器里的模型目录，
+ * 两个内置项也随之隐藏。0.10.0 起这一段被静默忽略（issue #13）。
+ *
+ * 段不合法（上游 Config 或目录校验拒绝）时退回部署配置并留一行 warn，不让一份
+ * 宿主写坏的文件把整条官方路由拉下线。
+ * @param ctx - 已挂好 `llm` 的根 context
+ * @param settings - 文档路径，只给用例用
+ * @returns 实际叠上的段所在的文件；没叠时 undefined
+ */
+export async function mountDeepSeekProvider(ctx: Context, settings: AcpSettingsConfig = {}): Promise<string | undefined> {
+  const log = ctx.logger('settings')
+  const found = readDeepSeekSection(settings, (message) => log.warn('%s', message))
+  if (found !== undefined) {
+    const config: Record<string, unknown> = structuredClone(DEEPSEEK_PROVIDER_CONFIG) as never
+    merge(config, found.section)
+    try {
+      await ctx.plugin(LlmDeepSeek, config as never)
+      log.info('%s from %s applied to %s', DEEPSEEK_NS, found.path, DEFAULT_PROVIDER)
+      return found.path
+    } catch (error) {
+      log.warn('ignoring %s in %s, using the built-in configuration: %s', DEEPSEEK_NS, found.path, String(error))
+    }
+  }
+  await ctx.plugin(LlmDeepSeek, DEEPSEEK_PROVIDER_CONFIG)
+  return undefined
+}
 
 /** 从环境变量读取配置，缺省值集中在此。 */
 export interface LauncherEnv {
@@ -607,8 +638,9 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   // watch 关掉：agent 是「一个客户端连接 = 一个进程」的短命子进程，热重载没有
   // 收益，而 fs watcher 会一直持有事件循环，让进程在 stdin 关闭后不退出。
   await ctx.plugin(LocalCredentials, { watch: false })
-  // 推理档位、模型目录与重试策略都显式给出，理由见 {@link DEEPSEEK_PROVIDER_CONFIG}。
-  await ctx.plugin(LlmDeepSeek, DEEPSEEK_PROVIDER_CONFIG)
+  // 推理档位、模型目录与重试策略都显式给出，理由见 {@link DEEPSEEK_PROVIDER_CONFIG}；
+  // 设置文档里的 `llm-deepseek` 段叠在它上面（issue #13）。
+  await mountDeepSeekProvider(ctx)
   const shadowed = await shadowedApiKeyNotice(ctx)
   if (shadowed !== undefined) ctx.logger('credentials').warn('%s', shadowed)
   // ── 用户设置文档：多 provider 的配置面 ────────────────────────────────
