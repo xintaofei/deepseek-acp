@@ -176,6 +176,14 @@ export interface ConfigInputs {
   readonly platform?: NodeJS.Platform
 }
 
+/**
+ * 「由提供方决定」这一项的取值；只在多档且适配器没报默认档时存在。
+ *
+ * 选它等于清空会话覆盖，请求省略档位。取值要避开词表里的真实档位 ID，否则
+ * `set_config_option` 分不清用户是想清空还是想选那一档。
+ * @param reasoning - 当前模型的档位词表
+ * @returns 哨兵取值；不需要这一项时 undefined
+ */
 export function providerDefaultValue(reasoning: ConfigInputs['reasoning']): string | undefined {
   if (reasoning === undefined || reasoning.defaultEffort !== undefined || reasoning.efforts.length < 2) {
     return undefined
@@ -237,7 +245,9 @@ export function configOptions(inputs: ConfigInputs): SessionConfigOption[] {
   if (efforts.length > 1) {
     // 会话没显式选过就显示适配器的默认档——这与实际发送的是同一个值：
     // `LlmRuntime` 也按 `requested ?? defaultEffort` 物化。同源，但那是运行时的
-    // 行为而非本模块能保证的事，所以有用例钉着（TC-REASON-02）。
+    // 行为而非本模块能保证的事，所以有用例钉着（TC-REASON-02）。适配器连默认档
+    // 都没报时，`requested ?? defaultEffort` 为空、请求不带档位，就显示「由提供方
+    // 决定」（TC-REASON-03）。
     const providerDefault = providerDefaultValue(inputs.reasoning)
     const current = inputs.controls.reasoningEffort() ?? inputs.reasoning?.defaultEffort ?? providerDefault
     // 没有默认档时，请求会省略档位。给它单独的选项，避免界面显示一个并未发送的值。

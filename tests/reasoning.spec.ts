@@ -5,15 +5,19 @@
  * `_meta`），所以档位唯一的表达位置就是 `configOptions`，与模型、文件权限同一
  * 个机制。
  *
- * 这条链有两处特有的坑，都在下面钉着：
+ * 这条链有三处特有的坑，都在下面钉着：
  *  1. 词表**随模型变**（有的路由只剩 `off`）。切模型后不换词表，选一个旧档位会
  *     在下一次请求里撞上 `UNSUPPORTED_REASONING_EFFORT`，而界面上毫无异常。
- *  2. 适配器可以不报告默认档。这时仍可选择档位，但没选过的请求应交由提供方决定。
+ *  2. 界面显示的默认档必须就是请求里实际带的那一档。照着适配器的报告画 UI，
+ *     就得有用例守着运行时确实把它物化进了请求（TC-REASON-02）。
+ *  3. 适配器可以不报告默认档（pi-ai 路由没配 `reasoning`）。这时仍可选择档位，
+ *     但没选过的请求应交由提供方决定，界面也要如实显示「由提供方决定」，而不是
+ *     编一个默认档或整项消失（TC-REASON-01 / 03）。
  */
 
 import { describe, expect, it } from 'vitest'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
-import { MODEL_OPTION, REASONING_OPTION, configOptions } from '../src/config/options.js'
+import { MODEL_OPTION, REASONING_OPTION, configOptions, providerDefaultValue } from '../src/config/options.js'
 import type { SessionControls } from '../src/port/types.js'
 import { createHarness, type TestHarness } from './harness.js'
 import { FAKE_MODEL, FAKE_MODEL_ALT } from './fake-llm.js'
@@ -114,6 +118,43 @@ describe('TC-REASON-01 档位项的组装', () => {
       },
     })
     expect(values(option(options, REASONING_OPTION))).toEqual(['off', 'turbo'])
+  })
+
+  it('没配默认档时多出「由提供方决定」，且没选过就停在它上面', () => {
+    const noDefault = { efforts: THREE.efforts }
+    const reasoning = option(
+      configOptions({ controls: stubControls(), routes: [], sandboxModes: [], reasoning: noDefault }),
+      REASONING_OPTION,
+    )
+    expect(values(reasoning)).toEqual(['provider-default', 'off', 'high', 'max'])
+    expect(current(reasoning)).toBe('provider-default')
+
+    // 选过之后当前值是那一档，「由提供方决定」仍在候选里，可以选回去。
+    const picked = option(
+      configOptions({
+        controls: stubControls({ reasoningEffort: () => 'max' }),
+        routes: [],
+        sandboxModes: [],
+        reasoning: noDefault,
+      }),
+      REASONING_OPTION,
+    )
+    expect(current(picked)).toBe('max')
+    expect(values(picked)).toEqual(['provider-default', 'off', 'high', 'max'])
+  })
+
+  it('配了默认档时不加「由提供方决定」——那一档本来就会发出去', () => {
+    expect(providerDefaultValue(THREE)).toBeUndefined()
+  })
+
+  it('没配默认档但只有一个候选时仍不 advertise', () => {
+    const options = configOptions({
+      controls: stubControls(),
+      routes: [],
+      sandboxModes: [],
+      reasoning: { efforts: [{ id: 'off', name: 'OFF' }] },
+    })
+    expect(option(options, REASONING_OPTION)).toBeUndefined()
   })
 })
 
