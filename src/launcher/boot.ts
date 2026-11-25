@@ -45,6 +45,7 @@ import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import * as FsSearchTool from '@deepseek-ai/dsh-tool-fs-search'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import * as TodoTool from '@deepseek-ai/dsh-tool-todo'
+import * as ToolCallTimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
@@ -348,6 +349,12 @@ export async function composeAgent(
   // 也是绿的，但每一步模型请求都在装配提示词时抛 `ToolExecutorUnavailableError`
   // ——等于整个 agent 一轮都跑不起来。挂在根作用域，就是这个部署的默认执行器。
   await ctx.plugin(NativeToolExecutor)
+  // 工具自己声明的 `timeoutMs`（`grep` / `glob` 默认 30 s）只是元数据，`dsh-tools`
+  // 与执行器都不读它；真正布下截止时间、到点中止 `exec.signal` 并改报
+  // `TOOL_TIMEOUT` 的是这个 `tools/execute` 包装器（上游 `dsh` 基础组合里也有它）。
+  // 漏挂时一次跑飞的搜索只能等用户手动取消。不声明预算的工具（shell、read/write/edit）
+  // 它不碰，无需配置。
+  await ctx.plugin(ToolCallTimeoutPolicy)
   // 审批服务本身只是提问的接线板；真正的应答器由 bridge 注册（answerers/approval.ts）。
   // 没有应答器时链尾 fail-closed 成 `unavailable`。
   await ctx.plugin(WorkingDirectory, {})

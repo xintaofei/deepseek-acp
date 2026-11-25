@@ -18,7 +18,9 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveAgentsHome, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { EXIT_PLAN_MODE } from '@deepseek-ai/dsh-plan-mode'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 import { PLAN_SECTION, composeAgent, installStderrLog } from '../src/launcher/boot.js'
 import { createInProcessPort } from '../src/port/in-process.js'
@@ -337,4 +339,56 @@ describe('TC-COMP-06 stderr 日志放到 warn', () => {
     expect(all).toContain('探针：带堆栈的错误')
     expect(all).toMatch(/\n\s+at /)
   })
+})
+
+describe('TC-COMP-10 工具声明的超时预算真的生效', () => {
+  // `grep` / `glob` 在定义上带 `timeoutMs`（默认 30s），但那只是元数据：`dsh-tools`
+  // 与执行器都不读它，执行它的是 `dsh-tool-call-timeout-policy` 这个 `tools/execute`
+  // 包装器。漏挂时一次跑飞的搜索只能等用户手动取消（issue #20）。
+  // 这里换一个预算很短、只在 `exec.signal` 中止时才结束的工具，走的是同一条路。
+  it('超过 timeoutMs 自动中止并返回 TOOL_TIMEOUT', async () => {
+    const ctx = await composed()
+    let sawAbort = false
+    const dispose = ctx.tools.register(defineTool({
+      name: 'fake_slow_search',
+      description: 'test double for a search that never finishes on its own',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
+      timeoutMs: 200,
+      async execute(_args, exec) {
+        await new Promise<void>((resolve) => {
+          if (exec.signal.aborted) return resolve()
+          exec.signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+        sawAbort = true
+        throw new Error('aborted')
+      },
+    }))
+    try {
+      const caller = new AbortController()
+      // 兜底：策略没挂时工具永远不会自己结束，别让用例挂到 vitest 超时。
+      const fallback = setTimeout(() => caller.abort(), 5_000)
+      const started = Date.now()
+      const batch = await ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId('tc-comp-timeout'), name: 'fake_slow_search', arguments: '{}' }],
+        signal: caller.signal,
+      })
+      clearTimeout(fallback)
+      expect(caller.signal.aborted, '是兜底的调用方取消结束了它，不是工具预算').toBe(false)
+      expect(Date.now() - started).toBeLessThan(5_000)
+      expect(sawAbort).toBe(true)
+      const result = batch.results[0]!.result
+      expect(result.isError).toBe(true)
+      expect(result.error?.info?.code).toBe('TOOL_TIMEOUT')
+    } finally {
+      dispose()
+    }
+  }, 30_000)
+
+  it('grep / glob 都声明了预算 —— 策略只对带 timeoutMs 的工具生效', async () => {
+    const ctx = await composed()
+    for (const name of ['grep', 'glob']) {
+      expect(ctx.tools.get(name)?.timeoutMs, `${name} 没有超时预算`).toBeGreaterThan(0)
+    }
+  }, 30_000)
 })
